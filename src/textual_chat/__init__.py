@@ -18,5 +18,8 @@ from .chat import Chat
 # Advanced components (most users won't need these)
 from .db import ChatDatabase, Conversation, Message
 
+# Re-export GoldenWave for convenience
+from textual_golden import GoldenWave
+
 __version__ = "0.1.0"
-__all__ = ["Chat", "ChatDatabase", "Conversation", "Message"]
+__all__ = ["Chat", "ChatDatabase", "Conversation", "Message", "GoldenWave"]

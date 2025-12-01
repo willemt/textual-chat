@@ -37,6 +37,8 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Markdown, Static, TextArea
 
+from textual_golden import GoldenWave
+
 import litellm
 from litellm import acompletion
 
@@ -497,10 +499,10 @@ class Chat(Widget):
         widget = _MessageWidget("error", error)
         container.mount(widget)
 
-    def _add_message(self, role: str, content: str) -> "_MessageWidget":
+    def _add_message(self, role: str, content: str = "", loading: bool = False) -> "_MessageWidget":
         """Add a message to the UI."""
         container = self.query_one("#chat-messages", ScrollableContainer)
-        widget = _MessageWidget(role, content)
+        widget = _MessageWidget(role, content, loading=loading)
         container.mount(widget)
         container.scroll_end(animate=False)
         return widget
@@ -527,8 +529,8 @@ class Chat(Widget):
         self._messages.append({"role": "user", "content": content})
         self.post_message(self.Sent(content))
 
-        # Show responding indicator
-        assistant_widget = self._add_message("assistant", "*Responding...*")
+        # Show responding indicator with wave animation
+        assistant_widget = self._add_message("assistant", loading=True)
         self._set_status("Responding...")
 
         try:
@@ -752,19 +754,31 @@ class Chat(Widget):
 class _MessageWidget(Static):
     """A chat message."""
 
-    def __init__(self, role: str, content: str) -> None:
+    def __init__(self, role: str, content: str, loading: bool = False) -> None:
         super().__init__(classes=f"message {role}")
         self.role = role
         self._content = content
+        self._loading = loading
         self.border_title = role.title()
 
     def compose(self) -> ComposeResult:
-        yield Markdown(self._content, classes="content")
+        if self._loading:
+            yield GoldenWave("Responding...", classes="content")
+        else:
+            yield Markdown(self._content, classes="content")
 
     def update_content(self, content: str) -> None:
         self._content = content
+        self._loading = False
         try:
+            # Replace GoldenWave with Markdown if needed
+            wave = self.query_one(GoldenWave)
+            wave.remove()
+            self.mount(Markdown(content, classes="content"))
+        except NoMatches:
+            # Already has Markdown, just update it
             self.query_one(".content", Markdown).update(content)
+        try:
             # Scroll parent container to keep latest content visible
             if self.parent:
                 self.parent.scroll_end(animate=False)

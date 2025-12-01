@@ -36,8 +36,8 @@ class ChatModal(ModalScreen):
     """
 
     BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("f1", "dismiss", "Close"),
+        Binding("escape", "app.pop_screen", "Close"),
+        Binding("f1", "app.pop_screen", "Close"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -75,9 +75,13 @@ class ChatbotApp(App):
         )
         yield Footer()
 
+    def on_mount(self) -> None:
+        """Install the chat screen to preserve state."""
+        self.install_screen(ChatModal(), name="chat")
+
     def action_toggle_chat(self) -> None:
         """Toggle the chat modal."""
-        self.push_screen(ChatModal())
+        self.push_screen("chat")
 
 
 if __name__ == "__main__":
