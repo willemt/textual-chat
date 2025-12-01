@@ -65,9 +65,7 @@ class LLMClient:
         """
         self._tools = tools
 
-    def _build_messages(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _build_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Build the full message list including system prompt."""
         result = []
         if self.system_prompt:

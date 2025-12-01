@@ -38,7 +38,9 @@ class MyApp(App):
         yield Header()
         with Horizontal():
             with Vertical(id="content"):
-                yield Static("[bold]My App[/bold]\n\nYour content here.\n\nPress Ctrl+B to toggle the AI assistant.")
+                yield Static(
+                    "[bold]My App[/bold]\n\nYour content here.\n\nPress Ctrl+B to toggle the AI assistant."
+                )
             yield chat
         yield Footer()
 

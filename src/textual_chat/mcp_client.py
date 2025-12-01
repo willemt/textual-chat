@@ -46,7 +46,9 @@ class MCPClient:
 
     def __init__(self) -> None:
         self._sessions: dict[str, ClientSession] = {}
-        self._tools: dict[str, tuple[str, MCPTool]] = {}  # tool_name -> (server_name, tool)
+        self._tools: dict[str, tuple[str, MCPTool]] = (
+            {}
+        )  # tool_name -> (server_name, tool)
         self._cleanup_tasks: list[Any] = []
 
     @asynccontextmanager
@@ -87,9 +89,7 @@ class MCPClient:
                 finally:
                     del self._sessions[name]
                     # Remove tools from this server
-                    self._tools = {
-                        k: v for k, v in self._tools.items() if v[0] != name
-                    }
+                    self._tools = {k: v for k, v in self._tools.items() if v[0] != name}
 
     async def _discover_tools(self, server_name: str, session: ClientSession) -> None:
         """Discover tools from an MCP server."""

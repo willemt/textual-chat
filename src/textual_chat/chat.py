@@ -42,7 +42,7 @@ from typing import Any, Callable, Literal, get_type_hints
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import ScrollableContainer, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
@@ -71,6 +71,7 @@ ShowThinkingMode = Literal["inline", "separate"]
 
 class ConfigurationError(Exception):
     """Raised when Chat is misconfigured."""
+
     pass
 
 
@@ -90,6 +91,7 @@ def _detect_model() -> tuple[str, str | None]:
     # Check for Ollama
     try:
         import httpx
+
         resp = httpx.get("http://localhost:11434/api/tags", timeout=0.5)
         if resp.status_code == 200:
             tags = resp.json().get("models", [])
@@ -335,18 +337,21 @@ class Chat(Widget):
 
     class Sent(Message):
         """User sent a message."""
+
         def __init__(self, content: str) -> None:
             super().__init__()
             self.content = content
 
     class Responded(Message):
         """Assistant responded."""
+
         def __init__(self, content: str) -> None:
             super().__init__()
             self.content = content
 
     class ToolCalled(Message):
         """A tool was called."""
+
         def __init__(self, name: str, args: dict, result: str) -> None:
             super().__init__()
             self.name = name
@@ -355,6 +360,7 @@ class Chat(Widget):
 
     class Thinking(Message):
         """Model is thinking (extended thinking)."""
+
         def __init__(self, content: str) -> None:
             super().__init__()
             self.content = content
@@ -422,7 +428,9 @@ class Chat(Widget):
         self._tool_schemas: list[dict[str, Any]] = []
         self._mcp_servers: list[Any] = []
         self._mcp_clients: list[Any] = []
-        self._mcp_tools: dict[str, tuple[Any, str]] = {}  # tool_name -> (client, tool_name)
+        self._mcp_tools: dict[str, tuple[Any, str]] = (
+            {}
+        )  # tool_name -> (client, tool_name)
         self._is_responding = False
         self._cancel_requested = False
 
@@ -501,7 +509,11 @@ class Chat(Widget):
                         "function": {
                             "name": tool.name,
                             "description": tool.description or f"Call {tool.name}",
-                            "parameters": tool.inputSchema if hasattr(tool, 'inputSchema') else {"type": "object", "properties": {}},
+                            "parameters": (
+                                tool.inputSchema
+                                if hasattr(tool, "inputSchema")
+                                else {"type": "object", "properties": {}}
+                            ),
                         },
                     }
                     self._tool_schemas.append(schema)
@@ -603,7 +615,12 @@ class Chat(Widget):
         # Extended thinking support (Claude models)
         if self.thinking:
             # Check for int but not bool (bool is subclass of int in Python)
-            budget = self.thinking if isinstance(self.thinking, int) and not isinstance(self.thinking, bool) else 1024
+            budget = (
+                self.thinking
+                if isinstance(self.thinking, int)
+                and not isinstance(self.thinking, bool)
+                else 1024
+            )
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         return kwargs
@@ -649,7 +666,9 @@ class Chat(Widget):
 
         return thinking_text, response_text
 
-    async def _get_response_with_tools(self, widget: "_MessageWidget", kwargs: dict) -> str:
+    async def _get_response_with_tools(
+        self, widget: "_MessageWidget", kwargs: dict
+    ) -> str:
         """Get response handling tool calls and thinking."""
         response = await acompletion(**kwargs)
         message = response.choices[0].message
@@ -673,26 +692,30 @@ class Chat(Widget):
                 await asyncio.sleep(2)  # Show thinking briefly
             elif self.show_thinking == SEPARATE:
                 # Add separate thinking block BEFORE the assistant response
-                self._add_message("thinking", thinking_text, title="Thinking", before=widget)
+                self._add_message(
+                    "thinking", thinking_text, title="Thinking", before=widget
+                )
 
         # Handle tool calls
         while message.tool_calls and not self._cancel_requested:
             # Record assistant's tool call request
-            self._messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in message.tool_calls
-                ],
-            })
+            self._messages.append(
+                {
+                    "role": "assistant",
+                    "content": message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in message.tool_calls
+                    ],
+                }
+            )
 
             # Execute each tool
             for tc in message.tool_calls:
@@ -704,16 +727,20 @@ class Chat(Widget):
 
                 result = await self._call_tool(name, args)
 
-                self._messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                })
+                self._messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    }
+                )
 
                 self.post_message(self.ToolCalled(name, args, result))
 
             # Update kwargs with new messages and get next response
-            kwargs["messages"] = [{"role": "system", "content": self.system}] + self._messages
+            kwargs["messages"] = [
+                {"role": "system", "content": self.system}
+            ] + self._messages
 
             self._set_status("Responding...")
             response = await acompletion(**kwargs)
@@ -727,7 +754,9 @@ class Chat(Widget):
                     widget.show_thinking_animated(thinking_text)
                     await asyncio.sleep(2)
                 elif self.show_thinking == SEPARATE:
-                    self._add_message("thinking", thinking_text, title="Thinking", before=widget)
+                    self._add_message(
+                        "thinking", thinking_text, title="Thinking", before=widget
+                    )
 
         # Final response
         if text_content:
@@ -735,7 +764,9 @@ class Chat(Widget):
             return text_content
 
         # If no content after tools, stream a new response
-        kwargs["messages"] = [{"role": "system", "content": self.system}] + self._messages
+        kwargs["messages"] = [
+            {"role": "system", "content": self.system}
+        ] + self._messages
         return await self._stream_response(widget, kwargs)
 
     async def _call_tool(self, name: str, args: dict) -> str:
@@ -757,10 +788,10 @@ class Chat(Widget):
                 client, tool_name = self._mcp_tools[name]
                 result = await client.call_tool(tool_name, args)
                 # Handle different result types
-                if hasattr(result, 'content'):
+                if hasattr(result, "content"):
                     # MCP result with content blocks
                     if isinstance(result.content, list):
-                        texts = [c.text for c in result.content if hasattr(c, 'text')]
+                        texts = [c.text for c in result.content if hasattr(c, "text")]
                         return "\n".join(texts) if texts else str(result.content)
                     return str(result.content)
                 return str(result)
@@ -796,7 +827,9 @@ class Chat(Widget):
 class _MessageWidget(Static):
     """A chat message."""
 
-    def __init__(self, role: str, content: str, loading: bool = False, title: str | None = None) -> None:
+    def __init__(
+        self, role: str, content: str, loading: bool = False, title: str | None = None
+    ) -> None:
         super().__init__(classes=f"message {role}")
         self.role = role
         self._content = content
@@ -842,7 +875,9 @@ class _MessageWidget(Static):
         # Format args for display
         args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
         # Mount blue wave for tool execution
-        self.mount(Golden(f"Using {tool_name}({args_str})", colors=BLUE, classes="content"))
+        self.mount(
+            Golden(f"Using {tool_name}({args_str})", colors=BLUE, classes="content")
+        )
         self.call_after_refresh(self._scroll_parent)
 
     def show_thinking_animated(self, thinking_text: str) -> None:
@@ -852,7 +887,6 @@ class _MessageWidget(Static):
             content.remove()
         except NoMatches:
             pass
-        from textual.containers import Horizontal
         text = Static(f"Thinking: {thinking_text}")
         text.styles.width = "1fr"
         text.styles.text_style = "italic"

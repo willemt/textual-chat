@@ -22,4 +22,12 @@ from .db import ChatDatabase, Conversation, Message
 from textual_golden import Golden
 
 __version__ = "0.1.0"
-__all__ = ["Chat", "INLINE", "SEPARATE", "ChatDatabase", "Conversation", "Message", "Golden"]
+__all__ = [
+    "Chat",
+    "INLINE",
+    "SEPARATE",
+    "ChatDatabase",
+    "Conversation",
+    "Message",
+    "Golden",
+]
