@@ -809,6 +809,14 @@ class _MessageWidget(Static):
         else:
             yield Markdown(self._content, classes="content")
 
+    def _scroll_parent(self) -> None:
+        """Scroll parent container to show this message."""
+        try:
+            if self.parent:
+                self.parent.scroll_end(animate=False)
+        except Exception:
+            pass
+
     def update_content(self, content: str) -> None:
         self._content = content
         self._loading = False
@@ -820,12 +828,8 @@ class _MessageWidget(Static):
             pass
         # Mount new Markdown content
         self.mount(Markdown(content, classes="content"))
-        try:
-            # Scroll parent container to keep latest content visible
-            if self.parent:
-                self.parent.scroll_end(animate=False)
-        except Exception:
-            pass
+        # Scroll after refresh to ensure content is rendered
+        self.call_after_refresh(self._scroll_parent)
 
     def show_tool_running(self, tool_name: str, args: dict) -> None:
         """Show animated indicator while tool is running."""
@@ -839,6 +843,7 @@ class _MessageWidget(Static):
         args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
         # Mount blue wave for tool execution
         self.mount(Golden(f"Using {tool_name}({args_str})", colors=BLUE, classes="content"))
+        self.call_after_refresh(self._scroll_parent)
 
     def show_thinking_animated(self, thinking_text: str) -> None:
         """Show animated purple 'Thinking:' label with regular text."""
@@ -855,6 +860,7 @@ class _MessageWidget(Static):
         container.styles.height = "auto"
         container.styles.width = "100%"
         self.mount(container)
+        self.call_after_refresh(self._scroll_parent)
 
     def update_error(self, error: str) -> None:
         """Show error message in red."""
@@ -867,5 +873,4 @@ class _MessageWidget(Static):
             pass
         # Use Static with Rich markup for colored error
         self.mount(Static(f"[red]Error: {error}[/red]", classes="content"))
-
-
+        self.call_after_refresh(self._scroll_parent)
