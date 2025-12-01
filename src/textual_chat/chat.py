@@ -22,8 +22,19 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import sys
+
+# Setup logging to file (controlled by TEXTUAL_CHAT_LOGGING_LEVEL env var)
+_log_level = os.environ.get("TEXTUAL_CHAT_LOGGING_LEVEL", "").upper()
+if _log_level:
+    logging.basicConfig(
+        filename="textual_chat.log",
+        level=getattr(logging, _log_level, logging.DEBUG),
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+log = logging.getLogger(__name__)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, get_type_hints
@@ -37,15 +48,25 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Markdown, Static, TextArea
 
-from textual_golden import GoldenWave
+from textual_golden import Golden, BLUE, PURPLE
 
 import litellm
 from litellm import acompletion
 
 # Suppress litellm's noisy logging
 litellm.suppress_debug_info = True
+litellm.set_verbose = False
+logging.getLogger("litellm").setLevel(logging.CRITICAL)
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
 
 Role = Literal["user", "assistant", "system", "tool"]
+
+# Show thinking modes
+INLINE = "inline"  # Show animated thinking inside assistant block
+SEPARATE = "separate"  # Show thinking in separate block before response
+ShowThinkingMode = Literal["inline", "separate"]
 
 
 class ConfigurationError(Exception):
@@ -292,8 +313,9 @@ class Chat(Widget):
         color: $error;
     }
     Chat .message.thinking {
-        border: round $primary-darken-1;
+        border: round gray;
         color: $text-muted;
+        text-style: italic;
     }
     Chat .content {
         width: 100%;
@@ -343,12 +365,12 @@ class Chat(Widget):
         *,
         system: str | None = None,
         placeholder: str = "Message...",
-        tools: list[Callable] | dict[str, Callable] | None = None,
-        mcp: Any | list[Any] | None = None,
+        tools: list[Any] | dict[str, Callable] | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
         temperature: float | None = None,
         thinking: bool | int = False,
+        show_thinking: ShowThinkingMode | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -360,12 +382,12 @@ class Chat(Widget):
             model: LLM model (auto-detected if not set)
             system: System prompt
             placeholder: Input placeholder text
-            tools: List of functions or dict of name -> function to use as tools
-            mcp: FastMCP server(s) to use for tools
+            tools: List of functions and/or MCP servers, or dict of name -> function
             api_key: API key (usually from environment)
             api_base: Custom API endpoint
             temperature: Model temperature (0-1)
             thinking: Enable extended thinking. True for default budget, or int for token budget.
+            show_thinking: How to display thinking - INLINE (animated in assistant) or SEPARATE (own block).
             **llm_kwargs: Extra args passed to LiteLLM
         """
         super().__init__(name=name, id=id, classes=classes)
@@ -391,6 +413,7 @@ class Chat(Widget):
         self.api_base = api_base
         self.temperature = temperature
         self.thinking = thinking
+        self.show_thinking = show_thinking
         self.llm_kwargs = llm_kwargs
 
         # State
@@ -403,18 +426,19 @@ class Chat(Widget):
         self._is_responding = False
         self._cancel_requested = False
 
-        # Register initial tools
+        # Register initial tools (smart detection)
         if tools:
             if isinstance(tools, dict):
-                for name, func in tools.items():
-                    self._register_tool(func, name)
+                for tool_name, func in tools.items():
+                    self._register_tool(func, tool_name)
             else:
-                for func in tools:
-                    self._register_tool(func)
-
-        # Store MCP servers (connected on mount)
-        if mcp:
-            self._mcp_servers = mcp if isinstance(mcp, list) else [mcp]
+                for item in tools:
+                    if callable(item):
+                        # It's a function
+                        self._register_tool(item)
+                    else:
+                        # Assume it's an MCP server
+                        self._mcp_servers.append(item)
 
     def _register_tool(self, func: Callable, name: str | None = None) -> None:
         """Register a tool function internally."""
@@ -499,11 +523,22 @@ class Chat(Widget):
         widget = _MessageWidget("error", error)
         container.mount(widget)
 
-    def _add_message(self, role: str, content: str = "", loading: bool = False) -> "_MessageWidget":
+    def _add_message(
+        self,
+        role: str,
+        content: str = "",
+        loading: bool = False,
+        title: str | None = None,
+        before: "_MessageWidget | None" = None,
+    ) -> "_MessageWidget":
         """Add a message to the UI."""
         container = self.query_one("#chat-messages", ScrollableContainer)
-        widget = _MessageWidget(role, content, loading=loading)
-        container.mount(widget)
+        widget = _MessageWidget(role, content, loading=loading, title=title)
+        if before:
+            # Insert before the specified widget using mount with before parameter
+            container.mount(widget, before=before)
+        else:
+            container.mount(widget)
         container.scroll_end(animate=False)
         return widget
 
@@ -529,7 +564,7 @@ class Chat(Widget):
         self._messages.append({"role": "user", "content": content})
         self.post_message(self.Sent(content))
 
-        # Show responding indicator with wave animation
+        # Show responding indicator with animation
         assistant_widget = self._add_message("assistant", loading=True)
         self._set_status("Responding...")
 
@@ -540,11 +575,11 @@ class Chat(Widget):
             self.post_message(self.Responded(response))
 
         except asyncio.CancelledError:
-            assistant_widget.update_content("[dim]Cancelled[/dim]")
+            assistant_widget.update_content("*Cancelled*")
             self._set_status("Cancelled")
         except Exception as e:
             error_msg = f"Error: {e}"
-            assistant_widget.update_content(f"[red]{error_msg}[/red]")
+            assistant_widget.update_error(str(e))
             self._set_status(error_msg)
         finally:
             self._is_responding = False
@@ -567,7 +602,8 @@ class Chat(Widget):
 
         # Extended thinking support (Claude models)
         if self.thinking:
-            budget = self.thinking if isinstance(self.thinking, int) else 10000
+            # Check for int but not bool (bool is subclass of int in Python)
+            budget = self.thinking if isinstance(self.thinking, int) and not isinstance(self.thinking, bool) else 1024
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         return kwargs
@@ -604,23 +640,12 @@ class Chat(Widget):
         Returns:
             Tuple of (thinking_text, response_text)
         """
-        thinking_text = None
-        response_text = ""
+        # Litellm normalizes thinking into reasoning_content attribute
+        thinking_text = getattr(message, "reasoning_content", None)
+        response_text = message.content if isinstance(message.content, str) else ""
 
-        # Check if content is a list of blocks (extended thinking response)
-        content = message.content
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    block_type = block.get("type")
-                    if block_type == "thinking":
-                        thinking_text = block.get("thinking", "")
-                    elif block_type == "text":
-                        response_text = block.get("text", "")
-        elif isinstance(content, str):
-            response_text = content
-        elif content is not None:
-            response_text = str(content)
+        log.debug(f"Extracted reasoning_content: {thinking_text}")
+        log.debug(f"Extracted content: {response_text}")
 
         return thinking_text, response_text
 
@@ -629,16 +654,29 @@ class Chat(Widget):
         response = await acompletion(**kwargs)
         message = response.choices[0].message
 
+        # Log raw response for debugging
+        log.debug(f"Response message: {message}")
+        log.debug(f"Message content type: {type(message.content)}")
+        log.debug(f"Message content: {message.content}")
+
         # Extract and display thinking if present
         thinking_text, text_content = self._extract_thinking_and_text(message)
-        if thinking_text:
-            self._add_message("thinking", thinking_text)
+        log.debug(f"Extracted thinking: {thinking_text}")
+        log.debug(f"Extracted text: {text_content}")
+
+        # Display thinking based on show_thinking mode
+        if thinking_text and self.show_thinking:
             self.post_message(self.Thinking(thinking_text))
+            if self.show_thinking == INLINE:
+                # Show animated purple thinking in assistant widget, then update
+                widget.show_thinking_animated(thinking_text)
+                await asyncio.sleep(2)  # Show thinking briefly
+            elif self.show_thinking == SEPARATE:
+                # Add separate thinking block BEFORE the assistant response
+                self._add_message("thinking", thinking_text, title="Thinking", before=widget)
 
         # Handle tool calls
         while message.tool_calls and not self._cancel_requested:
-            widget.update_content("[dim]Using tools...[/dim]")
-
             # Record assistant's tool call request
             self._messages.append({
                 "role": "assistant",
@@ -661,8 +699,8 @@ class Chat(Widget):
                 name = tc.function.name
                 args = json.loads(tc.function.arguments)
 
-                self._set_status(f"Running {name}...")
-                widget.update_content(f"[dim]Running {name}...[/dim]")
+                self._set_status(f"Using {name}...")
+                widget.show_tool_running(name, args)
 
                 result = await self._call_tool(name, args)
 
@@ -683,9 +721,13 @@ class Chat(Widget):
 
             # Extract thinking from new response
             thinking_text, text_content = self._extract_thinking_and_text(message)
-            if thinking_text:
-                self._add_message("thinking", thinking_text)
+            if thinking_text and self.show_thinking:
                 self.post_message(self.Thinking(thinking_text))
+                if self.show_thinking == INLINE:
+                    widget.show_thinking_animated(thinking_text)
+                    await asyncio.sleep(2)
+                elif self.show_thinking == SEPARATE:
+                    self._add_message("thinking", thinking_text, title="Thinking", before=widget)
 
         # Final response
         if text_content:
@@ -754,16 +796,16 @@ class Chat(Widget):
 class _MessageWidget(Static):
     """A chat message."""
 
-    def __init__(self, role: str, content: str, loading: bool = False) -> None:
+    def __init__(self, role: str, content: str, loading: bool = False, title: str | None = None) -> None:
         super().__init__(classes=f"message {role}")
         self.role = role
         self._content = content
         self._loading = loading
-        self.border_title = role.title()
+        self.border_title = title or role.title()
 
     def compose(self) -> ComposeResult:
         if self._loading:
-            yield GoldenWave("Responding...", classes="content")
+            yield Golden("Responding...", classes="content")
         else:
             yield Markdown(self._content, classes="content")
 
@@ -771,18 +813,59 @@ class _MessageWidget(Static):
         self._content = content
         self._loading = False
         try:
-            # Replace GoldenWave with Markdown if needed
-            wave = self.query_one(GoldenWave)
-            wave.remove()
-            self.mount(Markdown(content, classes="content"))
+            # Remove any existing content widget
+            old_content = self.query_one(".content")
+            old_content.remove()
         except NoMatches:
-            # Already has Markdown, just update it
-            self.query_one(".content", Markdown).update(content)
+            pass
+        # Mount new Markdown content
+        self.mount(Markdown(content, classes="content"))
         try:
             # Scroll parent container to keep latest content visible
             if self.parent:
                 self.parent.scroll_end(animate=False)
         except Exception:
             pass
+
+    def show_tool_running(self, tool_name: str, args: dict) -> None:
+        """Show animated indicator while tool is running."""
+        try:
+            # Remove current content
+            content = self.query_one(".content")
+            content.remove()
+        except NoMatches:
+            pass
+        # Format args for display
+        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        # Mount blue wave for tool execution
+        self.mount(Golden(f"Using {tool_name}({args_str})", colors=BLUE, classes="content"))
+
+    def show_thinking_animated(self, thinking_text: str) -> None:
+        """Show animated purple 'Thinking:' label with regular text."""
+        try:
+            content = self.query_one(".content")
+            content.remove()
+        except NoMatches:
+            pass
+        from textual.containers import Horizontal
+        text = Static(f"Thinking: {thinking_text}")
+        text.styles.width = "1fr"
+        text.styles.text_style = "italic"
+        container = Horizontal(text, classes="content")
+        container.styles.height = "auto"
+        container.styles.width = "100%"
+        self.mount(container)
+
+    def update_error(self, error: str) -> None:
+        """Show error message in red."""
+        self._content = f"Error: {error}"
+        self._loading = False
+        try:
+            content = self.query_one(".content")
+            content.remove()
+        except NoMatches:
+            pass
+        # Use Static with Rich markup for colored error
+        self.mount(Static(f"[red]Error: {error}[/red]", classes="content"))
 
 

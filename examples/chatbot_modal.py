@@ -10,7 +10,7 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Static
 
-from textual_chat import Chat
+from textual_chat import Chat, INLINE, SEPARATE
 
 
 class ChatModal(ModalScreen):
@@ -42,9 +42,18 @@ class ChatModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Chat(system="You are a helpful assistant embedded in an app."),
+            Chat(
+                system="You are a helpful assistant embedded in an app.",
+                thinking=True,  # Enable extended thinking (default 1024 token budget)
+                show_thinking=SEPARATE,  # Show animated purple thinking in assistant block
+                # show_thinking=INLINE,  # Show animated purple thinking in assistant block
+            ),
             id="chat-modal-container",
         )
+
+    def on_screen_resume(self) -> None:
+        """Focus the chat input when modal is shown."""
+        self.query_one("#chat-input").focus()
 
 
 class ChatbotApp(App):

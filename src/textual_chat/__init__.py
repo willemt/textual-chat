@@ -13,13 +13,13 @@ That's it. See https://github.com/your/textual-chat for more.
 """
 
 # The only import most people need
-from .chat import Chat
+from .chat import Chat, INLINE, SEPARATE
 
 # Advanced components (most users won't need these)
 from .db import ChatDatabase, Conversation, Message
 
-# Re-export GoldenWave for convenience
-from textual_golden import GoldenWave
+# Re-export Golden for convenience
+from textual_golden import Golden
 
 __version__ = "0.1.0"
-__all__ = ["Chat", "ChatDatabase", "Conversation", "Message", "GoldenWave"]
+__all__ = ["Chat", "INLINE", "SEPARATE", "ChatDatabase", "Conversation", "Message", "Golden"]
