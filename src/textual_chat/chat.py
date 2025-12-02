@@ -35,6 +35,16 @@ if _log_level:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 log = logging.getLogger(__name__)
+
+# Separate logger for raw LLM content (controlled by TEXTUAL_CHAT_LOG_LLM env var)
+llm_log = logging.getLogger("textual_chat.llm")
+llm_log.setLevel(logging.DEBUG)
+llm_log.propagate = False  # Don't propagate to root logger
+if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
+    _llm_handler = logging.FileHandler("llm_content.log", mode="w")
+    _llm_handler.setLevel(logging.DEBUG)
+    _llm_handler.setFormatter(logging.Formatter("%(asctime)s\n%(message)s\n"))
+    llm_log.addHandler(_llm_handler)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, get_type_hints
@@ -46,9 +56,11 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Markdown, Static, TextArea
+from textual.widgets import DataTable, Markdown, Static, TextArea
 
 from textual_golden import Golden, BLUE, PURPLE
+
+from .tools.datatable import create_datatable_tools
 
 import litellm
 from litellm import acompletion
@@ -444,6 +456,16 @@ class Chat(Widget):
                     if callable(item):
                         # It's a function
                         self._register_tool(item)
+                    elif isinstance(item, DataTable):
+                        # It's a DataTable - register query tools
+                        self._register_datatable(item)
+                    elif (
+                        isinstance(item, tuple)
+                        and len(item) == 2
+                        and isinstance(item[0], DataTable)
+                    ):
+                        # It's a (DataTable, name) tuple
+                        self._register_datatable(item[0], item[1])
                     else:
                         # Assume it's an MCP server
                         self._mcp_servers.append(item)
@@ -456,6 +478,12 @@ class Chat(Widget):
         if name:
             schema["function"]["name"] = name
         self._tool_schemas.append(schema)
+
+    def _register_datatable(self, table: DataTable, name: str | None = None) -> None:
+        """Register a DataTable as queryable tools for the LLM."""
+        tools = create_datatable_tools(table, name or "table")
+        for tool_name, func in tools.items():
+            self._register_tool(func, tool_name)
 
     def tool(self, func: Callable) -> Callable:
         """Register a tool function.
@@ -673,6 +701,9 @@ class Chat(Widget):
         response = await acompletion(**kwargs)
         message = response.choices[0].message
 
+        # Log raw LLM response
+        llm_log.debug(f"=== LLM Response ===\n{message}")
+
         # Log raw response for debugging
         log.debug(f"Response message: {message}")
         log.debug(f"Message content type: {type(message.content)}")
@@ -745,6 +776,9 @@ class Chat(Widget):
             self._set_status("Responding...")
             response = await acompletion(**kwargs)
             message = response.choices[0].message
+
+            # Log raw LLM response
+            llm_log.debug(f"=== LLM Response (after tools) ===\n{message}")
 
             # Extract thinking from new response
             thinking_text, text_content = self._extract_thinking_and_text(message)
@@ -874,10 +908,15 @@ class _MessageWidget(Static):
             pass
         # Format args for display
         args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        # Mount blue wave for tool execution
-        self.mount(
-            Golden(f"Using {tool_name}({args_str})", colors=BLUE, classes="content")
-        )
+        # Mount "Using" in blue wave, rest in regular text
+        label = Golden("Using ", colors=BLUE)
+        label.styles.width = "auto"
+        text = Static(f"{tool_name}({args_str})")
+        text.styles.width = "1fr"
+        container = Horizontal(label, text, classes="content")
+        container.styles.height = "auto"
+        container.styles.width = "100%"
+        self.mount(container)
         self.call_after_refresh(self._scroll_parent)
 
     def show_thinking_animated(self, thinking_text: str) -> None:
