@@ -337,8 +337,11 @@ class Chat(Widget):
         padding: 0;
     }
     Chat .content > * {
-        margin: 0;
+        margin: 0 0 1 0;
         padding: 0;
+    }
+    Chat .content > *:last-child {
+        margin-bottom: 0;
     }
     """
 
@@ -676,6 +679,9 @@ class Chat(Widget):
             if chunk.choices and chunk.choices[0].delta.content:
                 full_content += chunk.choices[0].delta.content
                 widget.update_content(full_content)
+
+        # Log the complete streamed response
+        llm_log.debug(f"=== LLM Response (streamed) ===\n{full_content}")
 
         return full_content
 
