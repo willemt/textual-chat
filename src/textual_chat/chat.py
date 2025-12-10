@@ -61,6 +61,7 @@ from textual.widgets import DataTable, Markdown, Static, TextArea
 from textual_golden import Golden, BLUE, PURPLE
 
 from .tools.datatable import create_datatable_tools
+from .tools.introspection import introspect_app
 
 import litellm
 from litellm import acompletion
@@ -392,6 +393,8 @@ class Chat(Widget):
         temperature: float | None = None,
         thinking: bool | int = False,
         show_thinking: ShowThinkingMode | None = None,
+        introspect: bool = True,
+        introspect_scope: Literal["app", "screen", "parent"] = "app",
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -409,6 +412,8 @@ class Chat(Widget):
             temperature: Model temperature (0-1)
             thinking: Enable extended thinking. True for default budget, or int for token budget.
             show_thinking: How to display thinking - INLINE (animated in assistant) or SEPARATE (own block).
+            introspect: Auto-discover app widgets and create tools for LLM (default True).
+            introspect_scope: Scope for introspection - "app", "screen", or "parent" (default "app").
             **llm_kwargs: Extra args passed to LiteLLM
         """
         super().__init__(name=name, id=id, classes=classes)
@@ -428,13 +433,16 @@ class Chat(Widget):
             self.model = model
             self._detected_from = None
 
-        self.system = system or "You are a helpful assistant."
+        self._base_system = system or "You are a helpful assistant."
+        self.system = self._base_system  # May be augmented by introspection
         self.placeholder = placeholder
         self.api_key = api_key
         self.api_base = api_base
         self.temperature = temperature
         self.thinking = thinking
         self.show_thinking = show_thinking
+        self.introspect = introspect
+        self.introspect_scope = introspect_scope
         self.llm_kwargs = llm_kwargs
 
         # State
@@ -513,9 +521,41 @@ class Chat(Widget):
         elif self._detected_from:
             self._set_status(f"Using {self.model} (from {self._detected_from})")
 
+        # Introspect app and register discovered tools
+        if self.introspect:
+            self._perform_introspection()
+
         # Connect to MCP servers
         if self._mcp_servers:
             await self._connect_mcp_servers()
+
+    def _perform_introspection(self) -> None:
+        """Introspect the app and register discovered tools."""
+        try:
+            # Exclude our own widget and children
+            exclude = {self.id} if self.id else set()
+            exclude.add("chat-input")
+            exclude.add("chat-messages")
+            exclude.add("chat-status")
+
+            tools, context = introspect_app(
+                self.app,
+                scope=self.introspect_scope,
+                exclude_widgets=exclude,
+            )
+
+            # Register discovered tools
+            for tool_name, func in tools.items():
+                self._register_tool(func, tool_name)
+
+            # Augment system prompt with context
+            if context:
+                self.system = f"{self._base_system}\n\nApplication context:\n{context}"
+
+            log.debug(f"Introspection found {len(tools)} tools")
+            log.debug(f"Context: {context}")
+        except Exception as e:
+            log.debug(f"Introspection failed: {e}")
 
     async def _connect_mcp_servers(self) -> None:
         """Connect to MCP servers and register their tools."""
