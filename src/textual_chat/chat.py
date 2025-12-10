@@ -393,6 +393,7 @@ class Chat(Widget):
         temperature: float | None = None,
         thinking: bool | int = False,
         show_thinking: ShowThinkingMode | None = None,
+        show_token_usage: bool = False,
         introspect: bool = True,
         introspect_scope: Literal["app", "screen", "parent"] = "app",
         name: str | None = None,
@@ -412,6 +413,7 @@ class Chat(Widget):
             temperature: Model temperature (0-1)
             thinking: Enable extended thinking. True for default budget, or int for token budget.
             show_thinking: How to display thinking - INLINE (animated in assistant) or SEPARATE (own block).
+            show_token_usage: Show token usage in status bar after each response.
             introspect: Auto-discover app widgets and create tools for LLM (default True).
             introspect_scope: Scope for introspection - "app", "screen", or "parent" (default "app").
             **llm_kwargs: Extra args passed to LiteLLM
@@ -441,6 +443,7 @@ class Chat(Widget):
         self.temperature = temperature
         self.thinking = thinking
         self.show_thinking = show_thinking
+        self.show_token_usage = show_token_usage
         self.introspect = introspect
         self.introspect_scope = introspect_scope
         self.llm_kwargs = llm_kwargs
@@ -600,6 +603,36 @@ class Chat(Widget):
         except Exception:
             pass
 
+    def _log_token_usage(
+        self, response: Any, widget: "_MessageWidget | None" = None
+    ) -> None:
+        """Log and optionally display token usage from response."""
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+
+        prompt_tokens = getattr(usage, "prompt_tokens", 0)
+        completion_tokens = getattr(usage, "completion_tokens", 0)
+        total_tokens = getattr(usage, "total_tokens", 0)
+        cached_tokens = getattr(usage, "prompt_tokens_details", None)
+        cache_read = 0
+        cache_creation = 0
+        if cached_tokens:
+            cache_read = getattr(cached_tokens, "cached_tokens", 0) or 0
+        # Anthropic-specific cache fields
+        cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = cache_read or getattr(usage, "cache_read_input_tokens", 0) or 0
+
+        # Log to llm_content.log
+        log_msg = f"Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens}"
+        if cache_read or cache_creation:
+            log_msg += f", Cache read: {cache_read}, Cache creation: {cache_creation}"
+        llm_log.debug(f"=== Token Usage ===\n{log_msg}")
+
+        # Set on message widget border subtitle
+        if widget and self.show_token_usage:
+            widget.set_token_usage(prompt_tokens, completion_tokens, cache_read)
+
     def _show_error(self, error: str) -> None:
         """Show an error message in the chat."""
         container = self.query_one("#chat-messages", ScrollableContainer)
@@ -669,9 +702,26 @@ class Chat(Widget):
 
     def _build_kwargs(self) -> dict[str, Any]:
         """Build kwargs for LiteLLM calls."""
+        is_claude = "claude" in self.model.lower()
+
+        # Build system message with cache_control for Anthropic
+        if is_claude:
+            system_msg = {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": self.system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        else:
+            system_msg = {"role": "system", "content": self.system}
+
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": self.system}] + self._messages,
+            "messages": [system_msg] + self._messages,
             **self.llm_kwargs,
         }
         if self.api_key:
@@ -681,7 +731,11 @@ class Chat(Widget):
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
         if self._tool_schemas:
-            kwargs["tools"] = self._tool_schemas
+            # Add cache_control to last tool for Anthropic prompt caching
+            tools = self._tool_schemas.copy()
+            if tools and is_claude:
+                tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+            kwargs["tools"] = tools
 
         # Extended thinking support (Claude models)
         if self.thinking:
@@ -710,18 +764,25 @@ class Chat(Widget):
     async def _stream_response(self, widget: "_MessageWidget", kwargs: dict) -> str:
         """Stream a response, updating the widget as chunks arrive."""
         kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
         response = await acompletion(**kwargs)
 
         full_content = ""
+        last_chunk = None
         async for chunk in response:
             if self._cancel_requested:
                 break
+            last_chunk = chunk
             if chunk.choices and chunk.choices[0].delta.content:
                 full_content += chunk.choices[0].delta.content
                 widget.update_content(full_content)
 
         # Log the complete streamed response
         llm_log.debug(f"=== LLM Response (streamed) ===\n{full_content}")
+
+        # Log token usage from final chunk
+        if last_chunk:
+            self._log_token_usage(last_chunk, widget)
 
         return full_content
 
@@ -747,8 +808,9 @@ class Chat(Widget):
         response = await acompletion(**kwargs)
         message = response.choices[0].message
 
-        # Log raw LLM response
+        # Log raw LLM response and token usage
         llm_log.debug(f"=== LLM Response ===\n{message}")
+        self._log_token_usage(response, widget)
 
         # Log raw response for debugging
         log.debug(f"Response message: {message}")
@@ -823,8 +885,9 @@ class Chat(Widget):
             response = await acompletion(**kwargs)
             message = response.choices[0].message
 
-            # Log raw LLM response
+            # Log raw LLM response and token usage
             llm_log.debug(f"=== LLM Response (after tools) ===\n{message}")
+            self._log_token_usage(response, widget)
 
             # Extract thinking from new response
             thinking_text, text_content = self._extract_thinking_and_text(message)
@@ -945,6 +1008,13 @@ class _MessageWidget(Static):
         self.mount(Markdown(content, classes="content"))
         # Scroll after refresh to ensure content is rendered
         self.call_after_refresh(self._scroll_parent)
+
+    def set_token_usage(self, prompt: int, completion: int, cached: int = 0) -> None:
+        """Set token usage in border subtitle."""
+        subtitle = f"↑{prompt} ↓{completion}"
+        if cached:
+            subtitle += f" ⚡{cached}"
+        self.border_subtitle = subtitle
 
     def show_tool_running(self, tool_name: str, args: dict) -> None:
         """Show animated indicator while tool is running."""
