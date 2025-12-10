@@ -860,6 +860,7 @@ class Chat(Widget):
                     result = await result
                 return str(result)
             except Exception as e:
+                llm_log.exception(f"Tool '{name}' error: {e}")
                 return f"Tool error: {e}"
 
         # Check MCP tools
@@ -876,6 +877,7 @@ class Chat(Widget):
                     return str(result.content)
                 return str(result)
             except Exception as e:
+                llm_log.exception(f"MCP tool '{name}' error: {e}")
                 return f"MCP tool error: {e}"
 
         return f"Unknown tool: {name}"
@@ -957,11 +959,16 @@ class _MessageWidget(Static):
         # Mount "Using" in blue wave, rest in regular text
         label = Golden("Using ", colors=BLUE)
         label.styles.width = "auto"
+        label.styles.height = "auto"
+        label.styles.margin = (0, 0, 0, 0)
         text = Static(f"{tool_name}({args_str})")
         text.styles.width = "1fr"
+        text.styles.height = "auto"
+        text.styles.margin = (0, 0, 0, 0)
         container = Horizontal(label, text, classes="content")
         container.styles.height = "auto"
         container.styles.width = "100%"
+        container.styles.margin = (0, 0, 0, 0)
         self.mount(container)
         self.call_after_refresh(self._scroll_parent)
 

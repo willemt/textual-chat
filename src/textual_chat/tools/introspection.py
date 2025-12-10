@@ -6,16 +6,31 @@ the LLM to interact with the application.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, Callable
 
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input, Label, Static, TextArea
+from textual.widgets import Button, DataTable, Input, Label, Static, TabbedContent, TextArea
 
 from .datatable import create_datatable_tools
 
 if TYPE_CHECKING:
     from textual.app import App
     from textual.screen import Screen
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize a name to be valid for tool names.
+
+    Tool names must match: ^[a-zA-Z0-9_-]{1,128}$
+    """
+    # Replace invalid characters with underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    # Ensure it doesn't start with a digit or hyphen
+    if sanitized and (sanitized[0].isdigit() or sanitized[0] == '-'):
+        sanitized = '_' + sanitized
+    # Truncate to 128 chars
+    return sanitized[:128]
 
 
 def introspect_app(
@@ -58,36 +73,63 @@ def introspect_app(
     discovered = _discover_widgets(root, exclude)
 
     # Generate tools for each discovered widget type
-    for widget in discovered["datatables"]:
-        widget_id = widget.id or f"table_{id(widget)}"
+    for i, widget in enumerate(discovered["datatables"]):
+        if widget.id:
+            widget_id = _sanitize_tool_name(widget.id)
+        else:
+            widget_id = "table" if i == 0 else f"table_{i + 1}"
         dt_tools = create_datatable_tools(widget, widget_id)
         tools.update(dt_tools)
         context_parts.append(f"DataTable '{widget_id}': queryable data table")
 
-    for widget in discovered["buttons"]:
-        widget_id = widget.id or f"button_{id(widget)}"
+    for i, widget in enumerate(discovered["buttons"]):
+        if widget.id:
+            widget_id = _sanitize_tool_name(widget.id)
+        else:
+            widget_id = "button" if i == 0 else f"button_{i + 1}"
         btn_tools = _create_button_tools(widget, widget_id)
         tools.update(btn_tools)
         label = str(widget.label) if hasattr(widget, "label") else widget_id
         context_parts.append(f"Button '{widget_id}': {label}")
 
-    for widget in discovered["inputs"]:
-        widget_id = widget.id or f"input_{id(widget)}"
+    for i, widget in enumerate(discovered["inputs"]):
+        if widget.id:
+            widget_id = _sanitize_tool_name(widget.id)
+        else:
+            widget_id = "input" if i == 0 else f"input_{i + 1}"
         input_tools = _create_input_tools(widget, widget_id)
         tools.update(input_tools)
         placeholder = getattr(widget, "placeholder", "")
         context_parts.append(f"Input '{widget_id}': {placeholder or 'text input'}")
 
-    for widget in discovered["textareas"]:
-        widget_id = widget.id or f"textarea_{id(widget)}"
+    for i, widget in enumerate(discovered["textareas"]):
+        if widget.id:
+            widget_id = _sanitize_tool_name(widget.id)
+        else:
+            widget_id = "textarea" if i == 0 else f"textarea_{i + 1}"
         ta_tools = _create_textarea_tools(widget, widget_id)
         tools.update(ta_tools)
         context_parts.append(f"TextArea '{widget_id}': multi-line text editor")
 
-    for widget in discovered["labels"]:
-        widget_id = widget.id or f"label_{id(widget)}"
+    for i, widget in enumerate(discovered["labels"]):
+        if widget.id:
+            widget_id = _sanitize_tool_name(widget.id)
+        else:
+            widget_id = "label" if i == 0 else f"label_{i + 1}"
         label_tools = _create_label_tools(widget, widget_id)
         tools.update(label_tools)
+
+    for i, widget in enumerate(discovered["tabbed_contents"]):
+        # Use widget id, or "tabs" for first one, "tabs_2" for second, etc.
+        if widget.id:
+            widget_id = _sanitize_tool_name(widget.id)
+        else:
+            widget_id = "tabs" if i == 0 else f"tabs_{i + 1}"
+        tab_tools = _create_tabbed_content_tools(widget, widget_id)
+        tools.update(tab_tools)
+        # Get tab names for context
+        tab_names = [tab.id or str(j) for j, tab in enumerate(widget.query("TabPane"))]
+        context_parts.append(f"TabbedContent '{widget_id}': tabs [{', '.join(tab_names)}]")
 
     # Add screen navigation tools
     screen_tools = _create_screen_tools(app)
@@ -117,6 +159,7 @@ def _discover_widgets(
         "inputs": [],
         "textareas": [],
         "labels": [],
+        "tabbed_contents": [],
         "other": [],
     }
 
@@ -140,6 +183,8 @@ def _discover_widgets(
             # Only include labeled ones
             if widget.id:
                 discovered["labels"].append(widget)
+        elif isinstance(widget, TabbedContent):
+            discovered["tabbed_contents"].append(widget)
 
         # Recurse into children
         for child in widget.children:
@@ -232,6 +277,33 @@ def _create_label_tools(label: Widget, name: str) -> dict[str, Callable]:
     return {f"read_{name}": read}
 
 
+def _create_tabbed_content_tools(tabbed: TabbedContent, name: str) -> dict[str, Callable]:
+    """Create tools for a TabbedContent widget."""
+
+    def get_active_tab() -> str:
+        """Get the currently active tab ID."""
+        return tabbed.active
+
+    def list_tabs() -> list[str]:
+        """List all available tab IDs."""
+        return [tab.id for tab in tabbed.query("TabPane") if tab.id]
+
+    def switch_tab(tab_id: str) -> str:
+        """Switch to a different tab.
+
+        Args:
+            tab_id: The ID of the tab to switch to
+        """
+        tabbed.active = tab_id
+        return f"Switched to tab '{tab_id}'"
+
+    return {
+        f"get_active_tab_{name}": get_active_tab,
+        f"list_tabs_{name}": list_tabs,
+        f"switch_tab_{name}": switch_tab,
+    }
+
+
 def _create_screen_tools(app: App) -> dict[str, Callable]:
     """Create tools for screen navigation."""
     tools: dict[str, Callable] = {}
@@ -261,7 +333,8 @@ def _create_screen_tools(app: App) -> dict[str, Callable]:
             app.push_screen(name)
             return f"Pushed screen '{name}'"
 
-        tools[f"push_screen_{screen_name}"] = push_screen
+        safe_name = _sanitize_tool_name(screen_name)
+        tools[f"push_screen_{safe_name}"] = push_screen
 
     return tools
 
@@ -280,15 +353,16 @@ def _create_action_tools(app: App) -> dict[str, Callable]:
     for binding in all_bindings:
         # Skip common/internal actions
         action = binding.action if hasattr(binding, "action") else str(binding)
-        if action in ("quit", "cancel", "focus_next", "focus_previous"):
+        if action in ("focus_next", "focus_previous"):
             continue
 
-        action_name = action.replace(".", "_")
+        # Use just the action name for the tool name (not the full binding repr)
+        action_name = _sanitize_tool_name(action)
         description = binding.description if hasattr(binding, "description") else action
 
-        def run_action(act: str = action) -> str:
+        def run_action(act: str = action, _app: App = app) -> str:
             """Run this action."""
-            app.action(act)
+            _app.run_action(act)
             return f"Executed action '{act}'"
 
         # Use description in docstring
