@@ -768,13 +768,27 @@ class Chat(Widget):
 
         full_content = ""
         last_chunk = None
+        stream = None
+
         async for chunk in response:
             if self._cancel_requested:
                 break
             last_chunk = chunk
             if chunk.choices and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
-                widget.update_content(full_content)
+                content = chunk.choices[0].delta.content
+                full_content += content
+                # Initialize markdown stream on first content
+                if stream is None:
+                    stream = widget.get_markdown_stream()
+                await stream.write(content)
+
+        # Close the stream
+        if stream:
+            await stream.stop()
+
+        # Scroll to bottom after streaming
+        container = self.query_one("#chat-messages", ScrollableContainer)
+        container.scroll_end(animate=False)
 
         # Log the complete streamed response
         llm_log.debug(f"=== LLM Response (streamed) ===\n{full_content}")
@@ -859,9 +873,11 @@ class Chat(Widget):
             for tc in message.tool_calls:
                 tu = ToolUse(tc.function.name, json.loads(tc.function.arguments))
 
-                widget.add_tooluse(tu)
+                await widget.add_tooluse(tu, tc.id)
 
                 result = await self._call_tool(tu)
+
+                await widget.remove_tooluse(tc.id)
 
                 self._messages.append(
                     {

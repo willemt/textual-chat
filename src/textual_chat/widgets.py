@@ -2,156 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, ScrollableContainer, Vertical
-from textual.css.query import NoMatches
+from textual.containers import ScrollableContainer, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static
 
-from textual_golden import Golden, BLUE
-
 if TYPE_CHECKING:
     from .db import ChatDatabase, Conversation
 
 Role = Literal["user", "assistant", "system"]
-
-
-@dataclass
-class ToolUse:
-    """Represents a tool use/call."""
-
-    name: str
-    args: dict[str, Any]
-
-    def __str__(self) -> str:
-        args_str = ", ".join(
-            f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0])
-        )
-        return f"{self.name}({args_str})"
-
-    def to_widget(self) -> Widget:
-        text = Static(str(self), markup=False)
-        text.styles.width = "1fr"
-        text.styles.height = "auto"
-        text.styles.margin = (0, 0, 0, 0)
-        return text
-
-
-def _humanize_tokens(n: int) -> str:
-    """Humanize token count: 3000 -> 3k, 1500 -> 1.5k."""
-    if n < 1000:
-        return str(n)
-    k = n / 1000
-    if k >= 10:
-        return f"{int(k)}k"
-    # Show one decimal, strip trailing zero
-    formatted = f"{k:.1f}".rstrip("0").rstrip(".")
-    return f"{formatted}k"
-
-
-class MessageWidget(Static):
-    """A chat message widget with loading states and tool display."""
-
-    def __init__(
-        self, role: str, content: str = "", loading: bool = False, title: str | None = None
-    ) -> None:
-        super().__init__(classes=f"message {role}")
-        self.role = role
-        self._content = content
-        self._loading = loading
-        self.border_title = title or role.title()
-
-    def compose(self) -> ComposeResult:
-        if self._loading:
-            yield Golden("Responding...", classes="content")
-        else:
-            yield Markdown(self._content, classes="content")
-
-    def _scroll_parent(self) -> None:
-        """Scroll parent container to show this message."""
-        try:
-            if self.parent:
-                self.parent.scroll_end(animate=False)
-        except Exception:
-            pass
-
-    def update_content(self, content: str) -> None:
-        """Update the message content."""
-        self._content = content
-        self._loading = False
-        try:
-            # Remove any existing content widget
-            old_content = self.query_one(".content")
-            old_content.remove()
-        except NoMatches:
-            pass
-        # Mount new Markdown content
-        self.mount(Markdown(content, classes="content"))
-        # Scroll after refresh to ensure content is rendered
-        self.call_after_refresh(self._scroll_parent)
-
-    def set_token_usage(self, prompt: int, completion: int, cached: int = 0) -> None:
-        """Set token usage in border subtitle."""
-        subtitle = f"↑{_humanize_tokens(prompt)} ↓{_humanize_tokens(completion)}"
-        if cached:
-            subtitle += f" ⚡{_humanize_tokens(cached)}"
-        self.border_subtitle = subtitle
-
-    def add_tooluse(self, tu: ToolUse) -> None:
-        """Show animated indicator while tool is running."""
-        try:
-            # Remove current content
-            content = self.query_one(".content")
-            content.remove()
-        except NoMatches:
-            pass
-        # Mount "Using" in blue wave, rest in regular text
-        label = Golden("Using ", colors=BLUE)
-        label.styles.width = "auto"
-        label.styles.height = "auto"
-        label.styles.margin = (0, 0, 0, 0)
-
-        container = Horizontal(label, tu.to_widget(), classes="content")
-        container.styles.height = "auto"
-        container.styles.width = "100%"
-        container.styles.margin = (0, 0, 0, 0)
-        self.mount(container)
-        self.call_after_refresh(self._scroll_parent)
-
-    def show_thinking_animated(self, thinking_text: str) -> None:
-        """Show animated purple 'Thinking:' label with regular text."""
-        try:
-            content = self.query_one(".content")
-            content.remove()
-        except NoMatches:
-            pass
-        text = Static(f"Thinking: {thinking_text}")
-        text.styles.width = "1fr"
-        text.styles.text_style = "italic"
-        container = Horizontal(text, classes="content")
-        container.styles.height = "auto"
-        container.styles.width = "100%"
-        self.mount(container)
-        self.call_after_refresh(self._scroll_parent)
-
-    def update_error(self, error: str) -> None:
-        """Show error message in red."""
-        self._content = f"Error: {error}"
-        self._loading = False
-        try:
-            content = self.query_one(".content")
-            content.remove()
-        except NoMatches:
-            pass
-        # Use Static with Rich markup for colored error
-        self.mount(Static(f"[red]Error: {error}[/red]", classes="content"))
-        self.call_after_refresh(self._scroll_parent)
 
 
 @dataclass
