@@ -1,0 +1,493 @@
+"""LLM adapter - provides llm-like interface over litellm.
+
+This adapter makes litellm code look similar to Simon Willison's llm library,
+allowing for cleaner, more maintainable chat.py code.
+
+Usage:
+    model = get_async_model("claude-sonnet-4-20250514")
+    conv = model.conversation()
+
+    async for chunk in conv.chain("Hello", tools=[my_func], system="Be helpful"):
+        print(chunk)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from typing import Any, Callable, get_type_hints, AsyncGenerator
+
+import litellm
+from litellm import acompletion
+
+# Suppress litellm's noisy logging
+litellm.suppress_debug_info = True
+litellm.set_verbose = False
+logging.getLogger("litellm").setLevel(logging.CRITICAL)
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+
+# Don't propagate to root logger (would interfere with TUI)
+log = logging.getLogger(__name__)
+log.propagate = False
+
+
+@dataclass
+class Usage:
+    """Token usage information."""
+    input: int = 0
+    output: int = 0
+    details: dict = field(default_factory=dict)
+
+
+@dataclass
+class ToolCall:
+    """Represents a tool call from the model."""
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ToolResult:
+    """Result from executing a tool."""
+    tool_call_id: str
+    output: str
+
+
+def _python_type_to_json(py_type: type | str) -> dict[str, Any]:
+    """Convert Python type to JSON schema."""
+    # Handle string annotations (forward references)
+    if isinstance(py_type, str):
+        type_lower = py_type.lower()
+        if "int" in type_lower:
+            return {"type": "integer"}
+        if "float" in type_lower:
+            return {"type": "number"}
+        if "bool" in type_lower:
+            return {"type": "boolean"}
+        if "list" in type_lower:
+            return {"type": "array"}
+        if "dict" in type_lower:
+            return {"type": "object"}
+        return {"type": "string"}
+
+    mapping = {
+        str: {"type": "string"},
+        int: {"type": "integer"},
+        float: {"type": "number"},
+        bool: {"type": "boolean"},
+        list: {"type": "array"},
+        dict: {"type": "object"},
+    }
+    return mapping.get(py_type, {"type": "string"})
+
+
+def _func_to_tool_schema(func: Callable) -> dict[str, Any]:
+    """Convert a function to OpenAI tool schema."""
+    # Try to get type hints, but fall back to raw annotations if evaluation fails
+    # (e.g., when annotations reference types not in scope like 'App')
+    try:
+        hints = get_type_hints(func) if hasattr(func, "__annotations__") else {}
+    except Exception:
+        # Fall back to raw annotations without evaluation
+        hints = getattr(func, "__annotations__", {})
+    sig = inspect.signature(func)
+
+    properties = {}
+    required = []
+
+    for name, param in sig.parameters.items():
+        if name in ("self", "cls"):
+            continue
+        properties[name] = _python_type_to_json(hints.get(name, str))
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+
+    return {
+        "type": "function",
+        "function": {
+            "name": func.__name__,
+            "description": (func.__doc__ or "").strip() or f"Call {func.__name__}",
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+def _detect_model() -> tuple[str | None, str | None]:
+    """Auto-detect the best available model. Returns (model, detected_from)."""
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"
+    if os.getenv("OPENAI_API_KEY"):
+        return "gpt-4o-mini", "OPENAI_API_KEY"
+    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        return "gemini/gemini-1.5-flash", "GEMINI_API_KEY"
+    if os.getenv("GROQ_API_KEY"):
+        return "groq/llama-3.1-8b-instant", "GROQ_API_KEY"
+    if os.getenv("DEEPSEEK_API_KEY"):
+        return "deepseek/deepseek-chat", "DEEPSEEK_API_KEY"
+
+    # Check for Ollama
+    try:
+        import httpx
+        resp = httpx.get("http://localhost:11434/api/tags", timeout=0.5)
+        if resp.status_code == 200:
+            tags = resp.json().get("models", [])
+            if tags:
+                return f"ollama/{tags[0]['name'].split(':')[0]}", "Ollama (localhost)"
+    except Exception:
+        pass
+
+    return None, None
+
+
+def get_async_model(
+    model_id: str | None = None,
+    *,
+    api_key: str | None = None,
+    api_base: str | None = None,
+) -> AsyncModel:
+    """Get an async model by ID, or auto-detect if not specified."""
+    if model_id is None:
+        detected, source = _detect_model()
+        if detected is None:
+            raise ValueError("No model configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
+        model_id = detected
+        log.info(f"Auto-detected model: {model_id} from {source}")
+    return AsyncModel(model_id, api_key=api_key, api_base=api_base)
+
+
+def get_default_model() -> str:
+    """Get the default model ID."""
+    model, _ = _detect_model()
+    return model or "gpt-4o-mini"
+
+
+class AsyncModel:
+    """Async model interface similar to llm library."""
+
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        api_key: str | None = None,
+        api_base: str | None = None,
+    ):
+        self.model_id = model_id
+        self.api_key = api_key
+        self.api_base = api_base
+        # Detect if this is a Claude model for cache control
+        self.is_claude = "claude" in model_id.lower()
+
+    def conversation(self) -> AsyncConversation:
+        """Create a new conversation."""
+        return AsyncConversation(self)
+
+
+class AsyncConversation:
+    """Manages conversation history and provides chain() for tool execution."""
+
+    def __init__(self, model: AsyncModel):
+        self.model = model
+        self._messages: list[dict[str, Any]] = []
+
+    def chain(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        tools: list[Callable] | None = None,
+        before_call: Callable[[ToolCall], Any] | None = None,
+        after_call: Callable[[ToolCall, ToolResult], Any] | None = None,
+        options: dict | None = None,
+    ) -> AsyncChainResponse:
+        """Execute prompt with automatic tool calling loop.
+
+        Args:
+            prompt: User message
+            system: System prompt
+            tools: List of callable functions to use as tools
+            before_call: Called before each tool execution
+            after_call: Called after each tool execution
+            options: Additional options (e.g., {"cache": True})
+
+        Returns:
+            AsyncChainResponse that yields text chunks and handles tool calls
+        """
+        return AsyncChainResponse(
+            conversation=self,
+            prompt=prompt,
+            system=system,
+            tools=tools,
+            before_call=before_call,
+            after_call=after_call,
+            options=options or {},
+        )
+
+    def clear(self) -> None:
+        """Clear conversation history."""
+        self._messages.clear()
+
+
+class AsyncChainResponse:
+    """Async iterator that yields text chunks and handles tool calls automatically."""
+
+    def __init__(
+        self,
+        conversation: AsyncConversation,
+        prompt: str,
+        system: str | None,
+        tools: list[Callable] | None,
+        before_call: Callable | None,
+        after_call: Callable | None,
+        options: dict,
+    ):
+        self._conversation = conversation
+        self._prompt = prompt
+        self._system = system
+        self._tools = tools or []
+        self._before_call = before_call
+        self._after_call = after_call
+        self._options = options
+
+        # Build tool schemas and lookup
+        self._tool_schemas: list[dict] = []
+        self._tool_lookup: dict[str, Callable] = {}
+        for func in self._tools:
+            schema = _func_to_tool_schema(func)
+            self._tool_schemas.append(schema)
+            self._tool_lookup[func.__name__] = func
+
+        # Response tracking
+        self._responses: list[AsyncResponse] = []
+        self._current_response: AsyncResponse | None = None
+        self._iterated = False
+
+    def _build_kwargs(self) -> dict[str, Any]:
+        """Build kwargs for litellm acompletion."""
+        model = self._conversation.model
+        is_claude = model.is_claude
+        cache = self._options.get("cache", False)
+
+        # Build system message with cache_control for Anthropic
+        if self._system:
+            if is_claude and cache:
+                system_msg = {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": self._system,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            else:
+                system_msg = {"role": "system", "content": self._system}
+            messages = [system_msg] + self._conversation._messages
+        else:
+            messages = list(self._conversation._messages)
+
+        kwargs: dict[str, Any] = {
+            "model": model.model_id,
+            "messages": messages,
+        }
+
+        if model.api_key:
+            kwargs["api_key"] = model.api_key
+        if model.api_base:
+            kwargs["api_base"] = model.api_base
+
+        if self._tool_schemas:
+            tools = self._tool_schemas.copy()
+            # Add cache_control to last tool for Anthropic
+            if tools and is_claude and cache:
+                tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+            kwargs["tools"] = tools
+
+        return kwargs
+
+    async def __aiter__(self):
+        """Iterate over text chunks, automatically handling tool calls."""
+        self._iterated = True
+
+        # Add user message to history
+        self._conversation._messages.append({"role": "user", "content": self._prompt})
+
+        while True:
+            kwargs = self._build_kwargs()
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+
+            response = await acompletion(**kwargs)
+
+            # Create response tracker
+            self._current_response = AsyncResponse()
+            self._responses.append(self._current_response)
+
+            # Collect streamed content and tool calls
+            full_content = ""
+            tool_calls_data: list[dict] = []
+            last_chunk = None
+
+            async for chunk in response:
+                last_chunk = chunk
+                if chunk.choices and chunk.choices[0].delta:
+                    delta = chunk.choices[0].delta
+
+                    # Yield text content
+                    if delta.content:
+                        full_content += delta.content
+                        yield delta.content
+
+                    # Collect tool calls
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            while len(tool_calls_data) <= idx:
+                                tool_calls_data.append({"id": "", "name": "", "arguments": ""})
+                            if tc.id:
+                                tool_calls_data[idx]["id"] = tc.id
+                            if tc.function:
+                                if tc.function.name:
+                                    tool_calls_data[idx]["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    tool_calls_data[idx]["arguments"] += tc.function.arguments
+
+            # Store usage from last chunk
+            if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
+                usage = last_chunk.usage
+                self._current_response._usage = Usage(
+                    input=getattr(usage, "prompt_tokens", 0) or 0,
+                    output=getattr(usage, "completion_tokens", 0) or 0,
+                    details=self._extract_cache_details(usage),
+                )
+
+            self._current_response._text = full_content
+
+            # If no tool calls, we're done
+            if not tool_calls_data or not any(tc["name"] for tc in tool_calls_data):
+                # Record assistant message
+                if full_content:
+                    self._conversation._messages.append({
+                        "role": "assistant",
+                        "content": full_content,
+                    })
+                break
+
+            # Record assistant message with tool calls
+            self._conversation._messages.append({
+                "role": "assistant",
+                "content": full_content or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                    for tc in tool_calls_data
+                    if tc["name"]
+                ],
+            })
+
+            async for tool_call, tool_result in self.do_tool_calls(tool_calls_data):
+                self._conversation._messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result.output,
+                })
+
+    async def do_tool_calls(
+        self, 
+        tool_calls_data: list[dict[str, Any]]
+    ) -> AsyncGenerator[tuple[ToolCall, ToolResult], None]:
+
+        for tc_data in tool_calls_data:
+            if not tc_data["name"]:
+                continue
+
+            tool_call = ToolCall(
+                id=tc_data["id"],
+                name=tc_data["name"],
+                arguments=json.loads(tc_data["arguments"]) if tc_data["arguments"] else {},
+            )
+
+            # Before callback
+            if self._before_call:
+                result = self._before_call(tool_call)
+                if asyncio.iscoroutine(result):
+                    await result
+
+            # Execute tool
+            func = self._tool_lookup.get(tool_call.name)
+            if func:
+                try:
+                    result = func(**tool_call.arguments)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    output = str(result)
+                except Exception as e:
+                    output = f"Error: {e}"
+            else:
+                output = f"Unknown tool: {tool_call.name}"
+
+            tool_result = ToolResult(tool_call_id=tool_call.id, output=output)
+
+            # After callback
+            if self._after_call:
+                result = self._after_call(tool_call, tool_result)
+                if asyncio.iscoroutine(result):
+                    await result
+
+            yield tool_call, tool_result
+
+    def _extract_cache_details(self, usage: Any) -> dict:
+        """Extract cache-related details from usage."""
+        details = {}
+        # OpenAI format
+        if hasattr(usage, "prompt_tokens_details"):
+            ptd = usage.prompt_tokens_details
+            if ptd and hasattr(ptd, "cached_tokens"):
+                details["cached_tokens"] = ptd.cached_tokens or 0
+        # Anthropic format
+        if hasattr(usage, "cache_read_input_tokens"):
+            details["cache_read_input_tokens"] = usage.cache_read_input_tokens or 0
+        if hasattr(usage, "cache_creation_input_tokens"):
+            details["cache_creation_input_tokens"] = usage.cache_creation_input_tokens or 0
+        return details
+
+    async def responses(self):
+        """Iterate over response objects (for usage info)."""
+        if not self._iterated:
+            # Consume the iterator first
+            async for _ in self:
+                pass
+        for resp in self._responses:
+            yield resp
+
+
+class AsyncResponse:
+    """Response object with text and usage information."""
+
+    def __init__(self):
+        self._text: str = ""
+        self._usage: Usage | None = None
+
+    async def text(self) -> str:
+        """Get the response text."""
+        return self._text
+
+    async def usage(self) -> Usage | None:
+        """Get token usage information."""
+        return self._usage

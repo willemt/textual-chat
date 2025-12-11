@@ -20,11 +20,8 @@ That's it.
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
 import logging
 import os
-import sys
 
 # Setup logging to file (controlled by TEXTUAL_CHAT_LOGGING_LEVEL env var)
 _log_level = os.environ.get("TEXTUAL_CHAT_LOGGING_LEVEL", "").upper()
@@ -46,32 +43,22 @@ if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
     _llm_handler.setFormatter(logging.Formatter("%(asctime)s\n%(message)s\n"))
     llm_log.addHandler(_llm_handler)
 
-from typing import Any, Callable, Literal, get_type_hints
+from typing import Any, Callable, Literal
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import DataTable, Static, TextArea
-
-from textual_golden import Golden, BLUE
+from textual.widgets import DataTable, OptionList, Static, TextArea
+from textual.widgets.option_list import Option
 
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
 from .widgets import MessageWidget, ToolUse
-
-import litellm
-from litellm import acompletion
-
-# Suppress litellm's noisy logging
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
-logging.getLogger("litellm").setLevel(logging.CRITICAL)
-logging.getLogger("httpx").setLevel(logging.CRITICAL)
-logging.getLogger("httpcore").setLevel(logging.CRITICAL)
-logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
+from .llm_adapter import get_async_model, AsyncModel, AsyncConversation, ToolCall, ToolResult
 
 Role = Literal["user", "assistant", "system", "tool"]
 
@@ -87,95 +74,86 @@ class ConfigurationError(Exception):
     pass
 
 
-def _detect_model() -> tuple[str, str | None]:
-    """Auto-detect the best available model. Returns (model, detected_from)."""
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"
-    if os.getenv("OPENAI_API_KEY"):
-        return "gpt-4o-mini", "OPENAI_API_KEY"
-    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
-        return "gemini/gemini-1.5-flash", "GEMINI_API_KEY"
-    if os.getenv("GROQ_API_KEY"):
-        return "groq/llama-3.1-8b-instant", "GROQ_API_KEY"
-    if os.getenv("DEEPSEEK_API_KEY"):
-        return "deepseek/deepseek-chat", "DEEPSEEK_API_KEY"
+class ModelSelectModal(ModalScreen[str | None]):
+    """Modal for selecting an LLM model."""
 
-    # Check for Ollama
-    try:
-        import httpx
-
-        resp = httpx.get("http://localhost:11434/api/tags", timeout=0.5)
-        if resp.status_code == 200:
-            tags = resp.json().get("models", [])
-            if tags:
-                return f"ollama/{tags[0]['name'].split(':')[0]}", "Ollama (localhost)"
-    except Exception:
-        pass
-
-    return None, None
-
-
-def _friendly_error_message() -> str:
-    """Generate a helpful error message when no model is configured."""
-    return """
-No LLM configured! Set up one of these:
-
-  # OpenAI
-  export OPENAI_API_KEY=sk-...
-
-  # Anthropic
-  export ANTHROPIC_API_KEY=sk-ant-...
-
-  # Local with Ollama (free!)
-  brew install ollama && ollama run llama3.2
-
-  # Or specify a model directly:
-  Chat(model="gpt-4o-mini", api_key="sk-...")
-
-Docs: https://github.com/your/textual-chat
-""".strip()
-
-
-def _python_type_to_json(py_type: type) -> dict[str, Any]:
-    """Convert Python type to JSON schema."""
-    mapping = {
-        str: {"type": "string"},
-        int: {"type": "integer"},
-        float: {"type": "number"},
-        bool: {"type": "boolean"},
-        list: {"type": "array"},
-        dict: {"type": "object"},
+    DEFAULT_CSS = """
+    ModelSelectModal {
+        align: center middle;
     }
-    return mapping.get(py_type, {"type": "string"})
-
-
-def _func_to_tool(func: Callable) -> dict[str, Any]:
-    """Convert a function to OpenAI tool schema."""
-    hints = get_type_hints(func) if hasattr(func, "__annotations__") else {}
-    sig = inspect.signature(func)
-
-    properties = {}
-    required = []
-
-    for name, param in sig.parameters.items():
-        if name in ("self", "cls"):
-            continue
-        properties[name] = _python_type_to_json(hints.get(name, str))
-        if param.default is inspect.Parameter.empty:
-            required.append(name)
-
-    return {
-        "type": "function",
-        "function": {
-            "name": func.__name__,
-            "description": (func.__doc__ or "").strip() or f"Call {func.__name__}",
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        },
+    ModelSelectModal > Vertical {
+        width: 60;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: round $primary;
+        padding: 1 2;
     }
+    ModelSelectModal #title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    ModelSelectModal OptionList {
+        height: auto;
+        max-height: 20;
+    }
+    ModelSelectModal #model-info {
+        text-align: center;
+        color: $text-muted;
+        height: 1;
+        margin-top: 1;
+    }
+    ModelSelectModal #hint {
+        text-align: center;
+        color: $text-muted;
+        padding-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(
+        self, models: list[tuple[str, str, str]], current: str | None = None
+    ) -> None:
+        """Initialize modal.
+
+        Args:
+            models: List of (display_name, model_id, provider) tuples
+            current: Currently selected model_id
+        """
+        super().__init__()
+        self.models = models
+        self.current = current
+        self._model_info: dict[str, str] = {mid: provider for _, mid, provider in models}
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Select Model", id="title")
+            options = [
+                Option(f"{'● ' if mid == self.current else '  '}{name}", id=mid)
+                for name, mid, _ in self.models
+            ]
+            yield OptionList(*options)
+            yield Static("", id="model-info")
+            yield Static("[i]Enter to select, Escape to cancel[/i]", id="hint")
+
+    def on_option_list_option_highlighted(
+        self, event: OptionList.OptionHighlighted
+    ) -> None:
+        """Update info when option is highlighted."""
+        model_id = event.option.id
+        if model_id and model_id in self._model_info:
+            info = self._model_info[model_id]
+            self.query_one("#model-info", Static).update(f"[i]{info}[/i]")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class _ChatInput(TextArea):
@@ -347,6 +325,7 @@ class Chat(Widget):
 
     BINDINGS = [
         Binding("ctrl+l", "clear", "Clear", show=True),
+        Binding("ctrl+m", "select_model", "Models", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -380,6 +359,13 @@ class Chat(Widget):
             super().__init__()
             self.content = content
 
+    class ModelChanged(Message):
+        """Model was changed."""
+
+        def __init__(self, model: str) -> None:
+            super().__init__()
+            self.model = model
+
     def __init__(
         self,
         model: str | None = None,
@@ -393,6 +379,7 @@ class Chat(Widget):
         thinking: bool | int = False,
         show_thinking: ShowThinkingMode | None = None,
         show_token_usage: bool = False,
+        show_model_selector: bool = True,
         introspect: bool = True,
         introspect_scope: Literal["app", "screen", "parent"] = "app",
         name: str | None = None,
@@ -413,27 +400,15 @@ class Chat(Widget):
             thinking: Enable extended thinking. True for default budget, or int for token budget.
             show_thinking: How to display thinking - INLINE (animated in assistant) or SEPARATE (own block).
             show_token_usage: Show token usage in status bar after each response.
+            show_model_selector: Show Ctrl+M to open model selector (default True).
             introspect: Auto-discover app widgets and create tools for LLM (default True).
             introspect_scope: Scope for introspection - "app", "screen", or "parent" (default "app").
             **llm_kwargs: Extra args passed to LiteLLM
         """
         super().__init__(name=name, id=id, classes=classes)
 
-        # Auto-detect model if needed
-        if model is None:
-            detected_model, detected_from = _detect_model()
-            if detected_model is None:
-                self._config_error = _friendly_error_message()
-                self.model = "none"
-            else:
-                self._config_error = None
-                self.model = detected_model
-                self._detected_from = detected_from
-        else:
-            self._config_error = None
-            self.model = model
-            self._detected_from = None
-
+        # Model configuration
+        self._model_id = model  # Will use adapter's auto-detect if None
         self._base_system = system or "You are a helpful assistant."
         self.system = self._base_system  # May be augmented by introspection
         self.placeholder = placeholder
@@ -443,19 +418,23 @@ class Chat(Widget):
         self.thinking = thinking
         self.show_thinking = show_thinking
         self.show_token_usage = show_token_usage
+        self.show_model_selector = show_model_selector
         self.introspect = introspect
         self.introspect_scope = introspect_scope
         self.llm_kwargs = llm_kwargs
 
-        # State
-        self._messages: list[dict[str, Any]] = []
-        self._tools: dict[str, Callable] = {}
-        self._tool_schemas: list[dict[str, Any]] = []
+        # Adapter state (initialized in on_mount)
+        self._model: AsyncModel | None = None
+        self._conversation: AsyncConversation | None = None
+        self._config_error: str | None = None
+
+        # Tool state
+        self._tools: dict[str, Callable] = {}  # Local tools
         self._mcp_servers: list[Any] = []
         self._mcp_clients: list[Any] = []
-        self._mcp_tools: dict[str, tuple[Any, str]] = (
-            {}
-        )  # tool_name -> (client, tool_name)
+        self._mcp_tools: dict[str, tuple[Any, str]] = {}  # MCP tool_name -> (client, tool_name)
+
+        # Response state
         self._is_responding = False
         self._cancel_requested = False
 
@@ -486,11 +465,10 @@ class Chat(Widget):
     def _register_tool(self, func: Callable, name: str | None = None) -> None:
         """Register a tool function internally."""
         tool_name = name or func.__name__
+        # Wrap with custom name if provided
+        if name and func.__name__ != name:
+            func.__name__ = name
         self._tools[tool_name] = func
-        schema = _func_to_tool(func)
-        if name:
-            schema["function"]["name"] = name
-        self._tool_schemas.append(schema)
 
     def _register_datatable(self, table: DataTable, name: str | None = None) -> None:
         """Register a DataTable as queryable tools for the LLM."""
@@ -517,11 +495,19 @@ class Chat(Widget):
             yield _ChatInput(placeholder=self.placeholder, id="chat-input")
 
     async def on_mount(self) -> None:
-        """Show config error or model info on mount."""
-        if self._config_error:
+        """Initialize model and show status on mount."""
+        # Initialize the adapter model
+        try:
+            self._model = get_async_model(
+                self._model_id,
+                api_key=self.api_key,
+                api_base=self.api_base,
+            )
+            self._conversation = self._model.conversation()
+            self._update_model_status()
+        except ValueError as e:
+            self._config_error = str(e)
             self._show_error(self._config_error)
-        elif self._detected_from:
-            self._set_status(f"Using {self.model} (from {self._detected_from})")
 
         # Introspect app and register discovered tools
         if self.introspect:
@@ -530,6 +516,95 @@ class Chat(Widget):
         # Connect to MCP servers
         if self._mcp_servers:
             await self._connect_mcp_servers()
+
+    def _update_model_status(self) -> None:
+        """Update status to show current model."""
+        if not self._model:
+            return
+        model_id = self._model.model_id
+        if self.show_model_selector:
+            self._set_status(f"Using {model_id}. Ctrl+M for models")
+        else:
+            self._set_status(f"Using {model_id}")
+
+    def _get_available_models(self) -> list[tuple[str, str, str]]:
+        """Get list of available models as (display_name, model_id, provider) tuples."""
+        models = []
+
+        # Anthropic models
+        if os.getenv("ANTHROPIC_API_KEY"):
+            models.extend([
+                ("Claude Sonnet 4", "claude-sonnet-4-20250514", "Anthropic"),
+                ("Claude Opus 4", "claude-opus-4-20250514", "Anthropic"),
+                ("Claude Haiku 3.5", "claude-3-5-haiku-latest", "Anthropic"),
+            ])
+
+        # OpenAI models
+        if os.getenv("OPENAI_API_KEY"):
+            models.extend([
+                ("GPT-4o", "gpt-4o", "OpenAI"),
+                ("GPT-4o Mini", "gpt-4o-mini", "OpenAI"),
+                ("GPT-4 Turbo", "gpt-4-turbo", "OpenAI"),
+                ("o1", "o1", "OpenAI"),
+                ("o1-mini", "o1-mini", "OpenAI"),
+            ])
+
+        # Google models
+        if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+            models.extend([
+                ("Gemini 1.5 Flash", "gemini/gemini-1.5-flash", "Google"),
+                ("Gemini 1.5 Pro", "gemini/gemini-1.5-pro", "Google"),
+                ("Gemini 2.0 Flash", "gemini/gemini-2.0-flash-exp", "Google"),
+            ])
+
+        # Groq models
+        if os.getenv("GROQ_API_KEY"):
+            models.extend([
+                ("Llama 3.1 8B (Groq)", "groq/llama-3.1-8b-instant", "Groq"),
+                ("Llama 3.1 70B (Groq)", "groq/llama-3.1-70b-versatile", "Groq"),
+                ("Mixtral 8x7B (Groq)", "groq/mixtral-8x7b-32768", "Groq"),
+            ])
+
+        # DeepSeek models
+        if os.getenv("DEEPSEEK_API_KEY"):
+            models.extend([
+                ("DeepSeek Chat", "deepseek/deepseek-chat", "DeepSeek"),
+                ("DeepSeek Coder", "deepseek/deepseek-coder", "DeepSeek"),
+            ])
+
+        return models
+
+    def action_select_model(self) -> None:
+        """Show model selection modal."""
+        if not self.show_model_selector:
+            return
+        models = self._get_available_models()
+        if not models:
+            self.notify("No models available. Set API keys.", severity="warning")
+            return
+        current = self._model.model_id if self._model else None
+        self.app.push_screen(
+            ModelSelectModal(models, current),
+            self._on_model_selected,
+        )
+
+    def _on_model_selected(self, model_id: str | None) -> None:
+        """Handle model selection from modal."""
+        if not model_id:
+            return
+        if self._model and model_id == self._model.model_id:
+            return
+        try:
+            self._model = get_async_model(
+                model_id,
+                api_key=self.api_key,
+                api_base=self.api_base,
+            )
+            self._conversation = self._model.conversation()
+            self._update_model_status()
+            self.post_message(self.ModelChanged(model_id))
+        except Exception as e:
+            self._set_status(f"Failed: {e}")
 
     def _perform_introspection(self) -> None:
         """Introspect the app and register discovered tools."""
@@ -559,8 +634,23 @@ class Chat(Widget):
         except Exception as e:
             log.debug(f"Introspection failed: {e}")
 
+    def _make_mcp_wrapper(self, client: Any, name: str, description: str | None) -> Callable:
+        """Create an MCP tool wrapper function with proper closure capture."""
+        async def wrapper(**kwargs) -> str:
+            result = await client.call_tool(name, kwargs)
+            if hasattr(result, "content"):
+                if isinstance(result.content, list):
+                    texts = [c.text for c in result.content if hasattr(c, "text")]
+                    return "\n".join(texts) if texts else str(result.content)
+                return str(result.content)
+            return str(result)
+
+        wrapper.__name__ = name
+        wrapper.__doc__ = description or f"Call {name}"
+        return wrapper
+
     async def _connect_mcp_servers(self) -> None:
-        """Connect to MCP servers and register their tools."""
+        """Connect to MCP servers and register their tools as wrapper functions."""
         try:
             from fastmcp import Client
         except ImportError:
@@ -573,23 +663,12 @@ class Chat(Widget):
                 await client.__aenter__()
                 self._mcp_clients.append(client)
 
-                # Get tools from this server
+                # Get tools from this server and create wrapper functions
                 tools = await client.list_tools()
                 for tool in tools:
-                    # Register MCP tool schema
-                    schema = {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description or f"Call {tool.name}",
-                            "parameters": (
-                                tool.inputSchema
-                                if hasattr(tool, "inputSchema")
-                                else {"type": "object", "properties": {}}
-                            ),
-                        },
-                    }
-                    self._tool_schemas.append(schema)
+                    # Create wrapper with proper closure capture
+                    wrapper = self._make_mcp_wrapper(client, tool.name, tool.description)
+                    self._tools[tool.name] = wrapper
                     self._mcp_tools[tool.name] = (client, tool.name)
 
             except Exception as e:
@@ -601,36 +680,6 @@ class Chat(Widget):
             self.query_one("#chat-status", Static).update(text)
         except Exception:
             pass
-
-    def _log_token_usage(
-        self, response: Any, widget: "MessageWidget | None" = None
-    ) -> None:
-        """Log and optionally display token usage from response."""
-        usage = getattr(response, "usage", None)
-        if not usage:
-            return
-
-        prompt_tokens = getattr(usage, "prompt_tokens", 0)
-        completion_tokens = getattr(usage, "completion_tokens", 0)
-        total_tokens = getattr(usage, "total_tokens", 0)
-        cached_tokens = getattr(usage, "prompt_tokens_details", None)
-        cache_read = 0
-        cache_creation = 0
-        if cached_tokens:
-            cache_read = getattr(cached_tokens, "cached_tokens", 0) or 0
-        # Anthropic-specific cache fields
-        cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        cache_read = cache_read or getattr(usage, "cache_read_input_tokens", 0) or 0
-
-        # Log to llm_content.log
-        log_msg = f"Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens}"
-        if cache_read or cache_creation:
-            log_msg += f", Cache read: {cache_read}, Cache creation: {cache_creation}"
-        llm_log.debug(f"=== Token Usage ===\n{log_msg}")
-
-        # Set on message widget border subtitle
-        if widget and self.show_token_usage:
-            widget.set_token_usage(prompt_tokens, completion_tokens, cache_read)
 
     def _show_error(self, error: str) -> None:
         """Show an error message in the chat."""
@@ -670,13 +719,12 @@ class Chat(Widget):
         await self._send(content)
 
     async def _send(self, content: str) -> None:
-        """Send a message and get a response."""
+        """Send a message and get a response using the adapter."""
         self._is_responding = True
         self._cancel_requested = False
 
-        # Add user message
+        # Add user message to UI
         self._add_message("user", content)
-        self._messages.append({"role": "user", "content": content})
         self.post_message(self.Sent(content))
 
         # Show responding indicator with animation
@@ -684,10 +732,70 @@ class Chat(Widget):
         self._set_status("Responding...")
 
         try:
-            response = await self._get_response(assistant_widget)
-            self._messages.append({"role": "assistant", "content": response})
+            # Get tools list for adapter
+            tools = list(self._tools.values()) if self._tools else None
+
+            # Build options for caching
+            options = {"cache": self._model.is_claude} if self._model else {}
+
+            # Callbacks for tool display
+            async def before_tool(tc: ToolCall) -> None:
+                tu = ToolUse(tc.name, tc.arguments)
+                await assistant_widget.add_tooluse(tu, tc.id)
+                self._set_status(f"Using {tc.name}...")
+
+            async def after_tool(tc: ToolCall, result: ToolResult) -> None:
+                await assistant_widget.remove_tooluse(tc.id)
+                self.post_message(self.ToolCalled(tc.name, tc.arguments, result.output))
+                self._set_status("Responding...")
+
+            # Use adapter's chain() for automatic tool handling
+            chain = self._conversation.chain(
+                content,
+                system=self.system,
+                tools=tools,
+                before_call=before_tool,
+                after_call=after_tool,
+                options=options,
+            )
+
+            full_text = ""
+            stream = None
+
+            async for chunk in chain:
+                if self._cancel_requested:
+                    break
+                # Initialize markdown stream on first content
+                if stream is None:
+                    stream = assistant_widget.get_markdown_stream()
+                await stream.write(chunk)
+                full_text += chunk
+
+            # Close the stream
+            if stream:
+                await stream.stop()
+
+            # Scroll to bottom
+            container = self.query_one("#chat-messages", ScrollableContainer)
+            container.scroll_end(animate=False)
+
+            # Get token usage from responses
+            async for resp in chain.responses():
+                usage = await resp.usage()
+                if usage:
+                    llm_log.debug(
+                        f"=== Token Usage ===\nInput: {usage.input}, Output: {usage.output}"
+                    )
+                    if self.show_token_usage:
+                        cached = (
+                            usage.details.get("cache_read_input_tokens", 0)
+                            or usage.details.get("cached_tokens", 0)
+                        )
+                        assistant_widget.set_token_usage(usage.input, usage.output, cached)
+
+            llm_log.debug(f"=== LLM Response ===\n{full_text}")
             self._set_status("")
-            self.post_message(self.Responded(response))
+            self.post_message(self.Responded(full_text))
 
         except asyncio.CancelledError:
             assistant_widget.update_content("*Cancelled*")
@@ -696,276 +804,18 @@ class Chat(Widget):
             error_msg = f"Error: {e}"
             assistant_widget.update_error(str(e))
             self._set_status(error_msg)
+            log.exception(f"Error in _send: {e}")
         finally:
             self._is_responding = False
 
-    def _build_kwargs(self) -> dict[str, Any]:
-        """Build kwargs for LiteLLM calls."""
-        is_claude = "claude" in self.model.lower()
-
-        # Build system message with cache_control for Anthropic
-        if is_claude:
-            system_msg = {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": self.system,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-            }
-        else:
-            system_msg = {"role": "system", "content": self.system}
-
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": [system_msg] + self._messages,
-            **self.llm_kwargs,
-        }
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self._tool_schemas:
-            # Add cache_control to last tool for Anthropic prompt caching
-            tools = self._tool_schemas.copy()
-            if tools and is_claude:
-                tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
-            kwargs["tools"] = tools
-
-        # Extended thinking support (Claude models)
-        if self.thinking:
-            # Check for int but not bool (bool is subclass of int in Python)
-            budget = (
-                self.thinking
-                if isinstance(self.thinking, int)
-                and not isinstance(self.thinking, bool)
-                else 1024
-            )
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-
-        return kwargs
-
-    async def _get_response(self, widget: "MessageWidget") -> str:
-        """Get response from LLM with streaming, handling tool calls and thinking."""
-        kwargs = self._build_kwargs()
-
-        # If we have tools or thinking enabled, need non-streaming
-        if self._tool_schemas or self.thinking:
-            return await self._get_response_with_tools(widget, kwargs)
-
-        # No tools, no thinking - stream directly
-        return await self._stream_response(widget, kwargs)
-
-    async def _stream_response(self, widget: "MessageWidget", kwargs: dict) -> str:
-        """Stream a response, updating the widget as chunks arrive."""
-        kwargs["stream"] = True
-        kwargs["stream_options"] = {"include_usage": True}
-        response = await acompletion(**kwargs)
-
-        full_content = ""
-        last_chunk = None
-        stream = None
-
-        async for chunk in response:
-            if self._cancel_requested:
-                break
-            last_chunk = chunk
-            if chunk.choices and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                full_content += content
-                # Initialize markdown stream on first content
-                if stream is None:
-                    stream = widget.get_markdown_stream()
-                await stream.write(content)
-
-        # Close the stream
-        if stream:
-            await stream.stop()
-
-        # Scroll to bottom after streaming
-        container = self.query_one("#chat-messages", ScrollableContainer)
-        container.scroll_end(animate=False)
-
-        # Log the complete streamed response
-        llm_log.debug(f"=== LLM Response (streamed) ===\n{full_content}")
-
-        # Log token usage from final chunk
-        if last_chunk:
-            self._log_token_usage(last_chunk, widget)
-
-        return full_content
-
-    def _extract_thinking_and_text(self, message: Any) -> tuple[str | None, str]:
-        """Extract thinking and text content from a response message.
-
-        Returns:
-            Tuple of (thinking_text, response_text)
-        """
-        # Litellm normalizes thinking into reasoning_content attribute
-        thinking_text = getattr(message, "reasoning_content", None)
-        response_text = message.content if isinstance(message.content, str) else ""
-
-        log.debug(f"Extracted reasoning_content: {thinking_text}")
-        log.debug(f"Extracted content: {response_text}")
-
-        return thinking_text, response_text
-
-    async def _get_response_with_tools(
-        self, widget: "MessageWidget", kwargs: dict
-    ) -> str:
-        """Get response handling tool calls and thinking."""
-        response = await acompletion(**kwargs)
-        message = response.choices[0].message
-
-        # Log raw LLM response and token usage
-        llm_log.debug(f"=== LLM Response ===\n{message}")
-        self._log_token_usage(response, widget)
-
-        # Log raw response for debugging
-        log.debug(f"Response message: {message}")
-        log.debug(f"Message content type: {type(message.content)}")
-        log.debug(f"Message content: {message.content}")
-
-        # Extract and display thinking if present
-        thinking_text, text_content = self._extract_thinking_and_text(message)
-        log.debug(f"Extracted thinking: {thinking_text}")
-        log.debug(f"Extracted text: {text_content}")
-
-        # Display thinking based on show_thinking mode
-        if thinking_text and self.show_thinking:
-            self.post_message(self.Thinking(thinking_text))
-            if self.show_thinking == INLINE:
-                # Show animated purple thinking in assistant widget, then update
-                widget.show_thinking_animated(thinking_text)
-                await asyncio.sleep(2)  # Show thinking briefly
-            elif self.show_thinking == SEPARATE:
-                # Add separate thinking block BEFORE the assistant response
-                self._add_message(
-                    "thinking", thinking_text, title="Thinking", before=widget
-                )
-
-        # Handle tool calls
-        while message.tool_calls and not self._cancel_requested:
-            # Record assistant's tool call request
-            self._messages.append(
-                {
-                    "role": "assistant",
-                    "content": message.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in message.tool_calls
-                    ],
-                }
-            )
-
-            # Execute each tool
-            for tc in message.tool_calls:
-                tu = ToolUse(tc.function.name, json.loads(tc.function.arguments))
-
-                await widget.add_tooluse(tu, tc.id)
-
-                result = await self._call_tool(tu)
-
-                await widget.remove_tooluse(tc.id)
-
-                self._messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
-                    }
-                )
-
-                self.post_message(self.ToolCalled(tu.name, tu.args, result))
-
-            # Update kwargs with new messages and get next response
-            kwargs["messages"] = [
-                {"role": "system", "content": self.system}
-            ] + self._messages
-
-            self._set_status("Responding...")
-            response = await acompletion(**kwargs)
-            message = response.choices[0].message
-
-            # Log raw LLM response and token usage
-            llm_log.debug(f"=== LLM Response (after tools) ===\n{message}")
-            self._log_token_usage(response, widget)
-
-            # Extract thinking from new response
-            thinking_text, text_content = self._extract_thinking_and_text(message)
-            if thinking_text and self.show_thinking:
-                self.post_message(self.Thinking(thinking_text))
-                if self.show_thinking == INLINE:
-                    widget.show_thinking_animated(thinking_text)
-                    await asyncio.sleep(2)
-                elif self.show_thinking == SEPARATE:
-                    self._add_message(
-                        "thinking", thinking_text, title="Thinking", before=widget
-                    )
-
-        # Final response
-        if text_content:
-            widget.update_content(text_content)
-            return text_content
-
-        # If no content after tools, stream a new response
-        kwargs["messages"] = [
-            {"role": "system", "content": self.system}
-        ] + self._messages
-        return await self._stream_response(widget, kwargs)
-
-    async def _call_tool(self, tool: ToolUse) -> str:
-        """Execute a tool (local or MCP)."""
-        name = tool.name
-        args = tool.args
-
-        # Check local tools first
-        if name in self._tools:
-            try:
-                func = self._tools[name]
-                result = func(**args)
-                if asyncio.iscoroutine(result):
-                    result = await result
-                return str(result)
-            except Exception as e:
-                llm_log.exception(f"Tool '{name}' error: {e}")
-                return f"Tool error: {e}"
-
-        # Check MCP tools
-        if name in self._mcp_tools:
-            try:
-                client, tool_name = self._mcp_tools[name]
-                result = await client.call_tool(tool_name, args)
-                # Handle different result types
-                if hasattr(result, "content"):
-                    # MCP result with content blocks
-                    if isinstance(result.content, list):
-                        texts = [c.text for c in result.content if hasattr(c, "text")]
-                        return "\n".join(texts) if texts else str(result.content)
-                    return str(result.content)
-                return str(result)
-            except Exception as e:
-                llm_log.exception(f"MCP tool '{name}' error: {e}")
-                return f"MCP tool error: {e}"
-
-        return f"Unknown tool: {name}"
-
     def action_clear(self) -> None:
-        """Clear the chat."""
-        self._messages.clear()
+        """Clear the chat and start a new conversation."""
+        # Clear UI
         container = self.query_one("#chat-messages", ScrollableContainer)
         container.remove_children()
+        # Reset conversation in adapter
+        if self._conversation:
+            self._conversation.clear()
         self._set_status("Cleared")
 
     def action_cancel(self) -> None:
