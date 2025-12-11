@@ -46,23 +46,21 @@ if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
     _llm_handler.setFormatter(logging.Formatter("%(asctime)s\n%(message)s\n"))
     llm_log.addHandler(_llm_handler)
 
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Literal, get_type_hints
 
-from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.containers import ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import DataTable, Markdown, Static, TextArea
+from textual.widgets import DataTable, Static, TextArea
 
-from textual_golden import Golden, BLUE, PURPLE
+from textual_golden import Golden, BLUE
 
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
+from .widgets import MessageWidget, ToolUse
 
 import litellm
 from litellm import acompletion
@@ -81,25 +79,6 @@ Role = Literal["user", "assistant", "system", "tool"]
 INLINE = "inline"  # Show animated thinking inside assistant block
 SEPARATE = "separate"  # Show thinking in separate block before response
 ShowThinkingMode = Literal["inline", "separate"]
-
-
-@dataclass
-class ToolUse:
-    name: str
-    args: dict[str, Any]
-
-    def __str__(self) -> str:
-        args_str = ", ".join(
-            f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0])
-        )
-        return f"{self.name}({args_str})"
-
-    def to_widget(self) -> Widget:
-        text = Static(str(self))
-        text.styles.width = "1fr"
-        text.styles.height = "auto"
-        text.styles.margin = (0, 0, 0, 0)
-        return text
 
 
 class ConfigurationError(Exception):
@@ -168,18 +147,6 @@ def _python_type_to_json(py_type: type) -> dict[str, Any]:
         dict: {"type": "object"},
     }
     return mapping.get(py_type, {"type": "string"})
-
-
-def _humanize_tokens(n: int) -> str:
-    """Humanize token count: 3000 -> 3k, 1500 -> 1.5k."""
-    if n < 1000:
-        return str(n)
-    k = n / 1000
-    if k >= 10:
-        return f"{int(k)}k"
-    # Show one decimal, strip trailing zero
-    formatted = f"{k:.1f}".rstrip("0").rstrip(".")
-    return f"{formatted}k"
 
 
 def _func_to_tool(func: Callable) -> dict[str, Any]:
@@ -636,7 +603,7 @@ class Chat(Widget):
             pass
 
     def _log_token_usage(
-        self, response: Any, widget: "_MessageWidget | None" = None
+        self, response: Any, widget: "MessageWidget | None" = None
     ) -> None:
         """Log and optionally display token usage from response."""
         usage = getattr(response, "usage", None)
@@ -668,7 +635,7 @@ class Chat(Widget):
     def _show_error(self, error: str) -> None:
         """Show an error message in the chat."""
         container = self.query_one("#chat-messages", ScrollableContainer)
-        widget = _MessageWidget("error", error)
+        widget = MessageWidget("error", error)
         container.mount(widget)
 
     def _add_message(
@@ -677,11 +644,11 @@ class Chat(Widget):
         content: str = "",
         loading: bool = False,
         title: str | None = None,
-        before: "_MessageWidget | None" = None,
-    ) -> "_MessageWidget":
+        before: "MessageWidget | None" = None,
+    ) -> "MessageWidget":
         """Add a message to the UI."""
         container = self.query_one("#chat-messages", ScrollableContainer)
-        widget = _MessageWidget(role, content, loading=loading, title=title)
+        widget = MessageWidget(role, content, loading=loading, title=title)
         if before:
             # Insert before the specified widget using mount with before parameter
             container.mount(widget, before=before)
@@ -782,7 +749,7 @@ class Chat(Widget):
 
         return kwargs
 
-    async def _get_response(self, widget: "_MessageWidget") -> str:
+    async def _get_response(self, widget: "MessageWidget") -> str:
         """Get response from LLM with streaming, handling tool calls and thinking."""
         kwargs = self._build_kwargs()
 
@@ -793,7 +760,7 @@ class Chat(Widget):
         # No tools, no thinking - stream directly
         return await self._stream_response(widget, kwargs)
 
-    async def _stream_response(self, widget: "_MessageWidget", kwargs: dict) -> str:
+    async def _stream_response(self, widget: "MessageWidget", kwargs: dict) -> str:
         """Stream a response, updating the widget as chunks arrive."""
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
@@ -834,7 +801,7 @@ class Chat(Widget):
         return thinking_text, response_text
 
     async def _get_response_with_tools(
-        self, widget: "_MessageWidget", kwargs: dict
+        self, widget: "MessageWidget", kwargs: dict
     ) -> str:
         """Get response handling tool calls and thinking."""
         response = await acompletion(**kwargs)
@@ -1000,101 +967,3 @@ class Chat(Widget):
     def add_system_message(self, content: str) -> None:
         """Add a system message to the chat."""
         self._add_message("system", content)
-
-
-class _MessageWidget(Static):
-    """A chat message."""
-
-    def __init__(
-        self, role: str, content: str, loading: bool = False, title: str | None = None
-    ) -> None:
-        super().__init__(classes=f"message {role}")
-        self.role = role
-        self._content = content
-        self._loading = loading
-        self.border_title = title or role.title()
-
-    def compose(self) -> ComposeResult:
-        if self._loading:
-            yield Golden("Responding...", classes="content")
-        else:
-            yield Markdown(self._content, classes="content")
-
-    def _scroll_parent(self) -> None:
-        """Scroll parent container to show this message."""
-        try:
-            if self.parent:
-                self.parent.scroll_end(animate=False)
-        except Exception:
-            pass
-
-    def update_content(self, content: str) -> None:
-        self._content = content
-        self._loading = False
-        try:
-            # Remove any existing content widget
-            old_content = self.query_one(".content")
-            old_content.remove()
-        except NoMatches:
-            pass
-        # Mount new Markdown content
-        self.mount(Markdown(content, classes="content"))
-        # Scroll after refresh to ensure content is rendered
-        self.call_after_refresh(self._scroll_parent)
-
-    def set_token_usage(self, prompt: int, completion: int, cached: int = 0) -> None:
-        """Set token usage in border subtitle."""
-        subtitle = f"↑{_humanize_tokens(prompt)} ↓{_humanize_tokens(completion)}"
-        if cached:
-            subtitle += f" ⚡{_humanize_tokens(cached)}"
-        self.border_subtitle = subtitle
-
-    def add_tooluse(self, tu: ToolUse) -> None:
-        """Show animated indicator while tool is running."""
-        try:
-            # Remove current content
-            content = self.query_one(".content")
-            content.remove()
-        except NoMatches:
-            pass
-        # Mount "Using" in blue wave, rest in regular text
-        label = Golden("Using ", colors=BLUE)
-        label.styles.width = "auto"
-        label.styles.height = "auto"
-        label.styles.margin = (0, 0, 0, 0)
-
-        container = Horizontal(label, tu.to_widget(), classes="content")
-        container.styles.height = "auto"
-        container.styles.width = "100%"
-        container.styles.margin = (0, 0, 0, 0)
-        self.mount(container)
-        self.call_after_refresh(self._scroll_parent)
-
-    def show_thinking_animated(self, thinking_text: str) -> None:
-        """Show animated purple 'Thinking:' label with regular text."""
-        try:
-            content = self.query_one(".content")
-            content.remove()
-        except NoMatches:
-            pass
-        text = Static(f"Thinking: {thinking_text}")
-        text.styles.width = "1fr"
-        text.styles.text_style = "italic"
-        container = Horizontal(text, classes="content")
-        container.styles.height = "auto"
-        container.styles.width = "100%"
-        self.mount(container)
-        self.call_after_refresh(self._scroll_parent)
-
-    def update_error(self, error: str) -> None:
-        """Show error message in red."""
-        self._content = f"Error: {error}"
-        self._loading = False
-        try:
-            content = self.query_one(".content")
-            content.remove()
-        except NoMatches:
-            pass
-        # Use Static with Rich markup for colored error
-        self.mount(Static(f"[red]Error: {error}[/red]", classes="content"))
-        self.call_after_refresh(self._scroll_parent)

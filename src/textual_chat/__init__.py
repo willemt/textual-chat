@@ -17,6 +17,7 @@ from .chat import Chat, INLINE, SEPARATE
 
 # Advanced components (most users won't need these)
 from .db import ChatDatabase, Conversation, Message
+from .widgets import MessageWidget, ToolUse
 
 # Re-export Golden for convenience
 from textual_golden import Golden
@@ -29,5 +30,7 @@ __all__ = [
     "ChatDatabase",
     "Conversation",
     "Message",
+    "MessageWidget",
+    "ToolUse",
     "Golden",
 ]
