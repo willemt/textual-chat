@@ -150,6 +150,18 @@ def _python_type_to_json(py_type: type) -> dict[str, Any]:
     return mapping.get(py_type, {"type": "string"})
 
 
+def _humanize_tokens(n: int) -> str:
+    """Humanize token count: 3000 -> 3k, 1500 -> 1.5k."""
+    if n < 1000:
+        return str(n)
+    k = n / 1000
+    if k >= 10:
+        return f"{int(k)}k"
+    # Show one decimal, strip trailing zero
+    formatted = f"{k:.1f}".rstrip("0").rstrip(".")
+    return f"{formatted}k"
+
+
 def _func_to_tool(func: Callable) -> dict[str, Any]:
     """Convert a function to OpenAI tool schema."""
     hints = get_type_hints(func) if hasattr(func, "__annotations__") else {}
@@ -1011,9 +1023,9 @@ class _MessageWidget(Static):
 
     def set_token_usage(self, prompt: int, completion: int, cached: int = 0) -> None:
         """Set token usage in border subtitle."""
-        subtitle = f"↑{prompt} ↓{completion}"
+        subtitle = f"↑{_humanize_tokens(prompt)} ↓{_humanize_tokens(completion)}"
         if cached:
-            subtitle += f" ⚡{cached}"
+            subtitle += f" ⚡{_humanize_tokens(cached)}"
         self.border_subtitle = subtitle
 
     def show_tool_running(self, tool_name: str, args: dict) -> None:
