@@ -45,6 +45,7 @@ if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
     _llm_handler.setLevel(logging.DEBUG)
     _llm_handler.setFormatter(logging.Formatter("%(asctime)s\n%(message)s\n"))
     llm_log.addHandler(_llm_handler)
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, get_type_hints
@@ -80,6 +81,25 @@ Role = Literal["user", "assistant", "system", "tool"]
 INLINE = "inline"  # Show animated thinking inside assistant block
 SEPARATE = "separate"  # Show thinking in separate block before response
 ShowThinkingMode = Literal["inline", "separate"]
+
+
+@dataclass
+class ToolUse:
+    name: str
+    args: dict[str, Any]
+
+    def __str__(self) -> str:
+        args_str = ", ".join(
+            f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0])
+        )
+        return f"{self.name}({args_str})"
+
+    def to_widget(self) -> Widget:
+        text = Static(str(self))
+        text.styles.width = "1fr"
+        text.styles.height = "auto"
+        text.styles.margin = (0, 0, 0, 0)
+        return text
 
 
 class ConfigurationError(Exception):
@@ -870,13 +890,11 @@ class Chat(Widget):
 
             # Execute each tool
             for tc in message.tool_calls:
-                name = tc.function.name
-                args = json.loads(tc.function.arguments)
+                tu = ToolUse(tc.function.name, json.loads(tc.function.arguments))
 
-                self._set_status(f"Using {name}...")
-                widget.show_tool_running(name, args)
+                widget.add_tooluse(tu)
 
-                result = await self._call_tool(name, args)
+                result = await self._call_tool(tu)
 
                 self._messages.append(
                     {
@@ -886,7 +904,7 @@ class Chat(Widget):
                     }
                 )
 
-                self.post_message(self.ToolCalled(name, args, result))
+                self.post_message(self.ToolCalled(tu.name, tu.args, result))
 
             # Update kwargs with new messages and get next response
             kwargs["messages"] = [
@@ -924,8 +942,11 @@ class Chat(Widget):
         ] + self._messages
         return await self._stream_response(widget, kwargs)
 
-    async def _call_tool(self, name: str, args: dict) -> str:
+    async def _call_tool(self, tool: ToolUse) -> str:
         """Execute a tool (local or MCP)."""
+        name = tool.name
+        args = tool.args
+
         # Check local tools first
         if name in self._tools:
             try:
@@ -1028,7 +1049,7 @@ class _MessageWidget(Static):
             subtitle += f" ⚡{_humanize_tokens(cached)}"
         self.border_subtitle = subtitle
 
-    def show_tool_running(self, tool_name: str, args: dict) -> None:
+    def add_tooluse(self, tu: ToolUse) -> None:
         """Show animated indicator while tool is running."""
         try:
             # Remove current content
@@ -1036,18 +1057,13 @@ class _MessageWidget(Static):
             content.remove()
         except NoMatches:
             pass
-        # Format args for display
-        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
         # Mount "Using" in blue wave, rest in regular text
         label = Golden("Using ", colors=BLUE)
         label.styles.width = "auto"
         label.styles.height = "auto"
         label.styles.margin = (0, 0, 0, 0)
-        text = Static(f"{tool_name}({args_str})")
-        text.styles.width = "1fr"
-        text.styles.height = "auto"
-        text.styles.margin = (0, 0, 0, 0)
-        container = Horizontal(label, text, classes="content")
+
+        container = Horizontal(label, tu.to_widget(), classes="content")
         container.styles.height = "auto"
         container.styles.width = "100%"
         container.styles.margin = (0, 0, 0, 0)
