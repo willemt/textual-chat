@@ -779,19 +779,24 @@ class Chat(Widget):
             container = self.query_one("#chat-messages", ScrollableContainer)
             container.scroll_end(animate=False)
 
-            # Get token usage from responses
+            # Get token usage from final response (per-message, not cumulative)
+            last_usage = None
             async for resp in chain.responses():
                 usage = await resp.usage()
                 if usage:
-                    llm_log.debug(
-                        f"=== Token Usage ===\nInput: {usage.input}, Output: {usage.output}"
-                    )
-                    if self.show_token_usage:
-                        cached = (
-                            usage.details.get("cache_read_input_tokens", 0)
-                            or usage.details.get("cached_tokens", 0)
-                        )
-                        assistant_widget.set_token_usage(usage.input, usage.output, cached)
+                    last_usage = usage
+
+            if last_usage:
+                cached = (
+                    last_usage.details.get("cache_read_input_tokens", 0)
+                    or last_usage.details.get("cached_tokens", 0)
+                )
+                llm_log.debug(
+                    f"=== Token Usage ===\n"
+                    f"Input: {last_usage.input}, Output: {last_usage.output}, Cached: {cached}"
+                )
+                if self.show_token_usage:
+                    assistant_widget.set_token_usage(last_usage.input, last_usage.output, cached)
 
             llm_log.debug(f"=== LLM Response ===\n{full_text}")
             self._set_status("")

@@ -19,7 +19,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, get_type_hints, AsyncGenerator
+from typing import Any, Callable, get_type_hints, AsyncGenerator, TypedDict
 
 import litellm
 from litellm import acompletion
@@ -36,12 +36,35 @@ log = logging.getLogger(__name__)
 log.propagate = False
 
 
+class CacheDetails(TypedDict, total=False):
+    """Cache-related token details."""
+    cached_tokens: int  # OpenAI format
+    cache_read_input_tokens: int  # Anthropic format
+    cache_creation_input_tokens: int  # Anthropic format
+
+
+def _extract_cache_details(usage: Any) -> CacheDetails:
+    """Extract cache-related details from usage object."""
+    details: CacheDetails = {}
+    # OpenAI format
+    if hasattr(usage, "prompt_tokens_details"):
+        ptd = usage.prompt_tokens_details
+        if ptd and hasattr(ptd, "cached_tokens"):
+            details["cached_tokens"] = ptd.cached_tokens or 0
+    # Anthropic format
+    if hasattr(usage, "cache_read_input_tokens"):
+        details["cache_read_input_tokens"] = usage.cache_read_input_tokens or 0
+    if hasattr(usage, "cache_creation_input_tokens"):
+        details["cache_creation_input_tokens"] = usage.cache_creation_input_tokens or 0
+    return details
+
+
 @dataclass
 class Usage:
     """Token usage information."""
     input: int = 0
     output: int = 0
-    details: dict = field(default_factory=dict)
+    details: CacheDetails = field(default_factory=dict)
 
 
 @dataclass
@@ -368,7 +391,7 @@ class AsyncChainResponse:
                 self._current_response._usage = Usage(
                     input=getattr(usage, "prompt_tokens", 0) or 0,
                     output=getattr(usage, "completion_tokens", 0) or 0,
-                    details=self._extract_cache_details(usage),
+                    details=_extract_cache_details(usage),
                 )
 
             self._current_response._text = full_content
@@ -409,19 +432,22 @@ class AsyncChainResponse:
                 })
 
     async def do_tool_calls(
-        self, 
+        self,
         tool_calls_data: list[dict[str, Any]]
     ) -> AsyncGenerator[tuple[ToolCall, ToolResult], None]:
+        """Execute tool calls: sync tools first, then async tools in parallel."""
 
+        # Parse all tool calls and fire before callbacks
+        tool_calls: list[ToolCall] = []
         for tc_data in tool_calls_data:
             if not tc_data["name"]:
                 continue
-
             tool_call = ToolCall(
                 id=tc_data["id"],
                 name=tc_data["name"],
                 arguments=json.loads(tc_data["arguments"]) if tc_data["arguments"] else {},
             )
+            tool_calls.append(tool_call)
 
             # Before callback
             if self._before_call:
@@ -429,43 +455,61 @@ class AsyncChainResponse:
                 if asyncio.iscoroutine(result):
                     await result
 
-            # Execute tool
-            func = self._tool_lookup.get(tool_call.name)
-            if func:
-                try:
-                    result = func(**tool_call.arguments)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    output = str(result)
-                except Exception as e:
-                    output = f"Error: {e}"
+        # Separate sync vs async tools
+        sync_calls: list[tuple[ToolCall, Callable]] = []
+        async_calls: list[tuple[ToolCall, Callable]] = []
+        unknown_calls: list[ToolCall] = []
+
+        for tc in tool_calls:
+            func = self._tool_lookup.get(tc.name)
+            if func is None:
+                unknown_calls.append(tc)
+            elif asyncio.iscoroutinefunction(func):
+                async_calls.append((tc, func))
             else:
-                output = f"Unknown tool: {tool_call.name}"
+                sync_calls.append((tc, func))
 
-            tool_result = ToolResult(tool_call_id=tool_call.id, output=output)
+        # Results dict keyed by tool_call.id to maintain order
+        results: dict[str, ToolResult] = {}
 
-            # After callback
+        # Execute sync tools (fast, do them first)
+        for tc, func in sync_calls:
+            try:
+                output = str(func(**tc.arguments))
+            except Exception as e:
+                output = f"Error: {e}"
+            results[tc.id] = ToolResult(tool_call_id=tc.id, output=output)
+
+        # Execute async tools in parallel
+        async def run_async_tool(tc: ToolCall, func: Callable) -> tuple[str, ToolResult]:
+            try:
+                output = str(await func(**tc.arguments))
+            except Exception as e:
+                output = f"Error: {e}"
+            return tc.id, ToolResult(tool_call_id=tc.id, output=output)
+
+        if async_calls:
+            async_results = await asyncio.gather(
+                *(run_async_tool(tc, func) for tc, func in async_calls)
+            )
+            for tc_id, result in async_results:
+                results[tc_id] = result
+
+        # Handle unknown tools
+        for tc in unknown_calls:
+            results[tc.id] = ToolResult(tool_call_id=tc.id, output=f"Unknown tool: {tc.name}")
+
+        # Yield results in original order, firing after callbacks
+        for tc in tool_calls:
+            tool_result = results[tc.id]
+
             if self._after_call:
-                result = self._after_call(tool_call, tool_result)
+                result = self._after_call(tc, tool_result)
                 if asyncio.iscoroutine(result):
                     await result
 
-            yield tool_call, tool_result
+            yield tc, tool_result
 
-    def _extract_cache_details(self, usage: Any) -> dict:
-        """Extract cache-related details from usage."""
-        details = {}
-        # OpenAI format
-        if hasattr(usage, "prompt_tokens_details"):
-            ptd = usage.prompt_tokens_details
-            if ptd and hasattr(ptd, "cached_tokens"):
-                details["cached_tokens"] = ptd.cached_tokens or 0
-        # Anthropic format
-        if hasattr(usage, "cache_read_input_tokens"):
-            details["cache_read_input_tokens"] = usage.cache_read_input_tokens or 0
-        if hasattr(usage, "cache_creation_input_tokens"):
-            details["cache_creation_input_tokens"] = usage.cache_creation_input_tokens or 0
-        return details
 
     async def responses(self):
         """Iterate over response objects (for usage info)."""
