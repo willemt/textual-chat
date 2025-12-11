@@ -739,13 +739,13 @@ class Chat(Widget):
             options = {"cache": self._model.is_claude} if self._model else {}
 
             # Callbacks for tool display
-            async def before_tool(tc: ToolCall) -> None:
+            def before_tool(tc: ToolCall) -> None:
                 tu = ToolUse(tc.name, tc.arguments)
-                await assistant_widget.add_tooluse(tu, tc.id)
+                assistant_widget.add_tooluse(tu, tc.id)
                 self._set_status(f"Using {tc.name}...")
 
-            async def after_tool(tc: ToolCall, result: ToolResult) -> None:
-                await assistant_widget.remove_tooluse(tc.id)
+            def after_tool(tc: ToolCall, result: ToolResult) -> None:
+                assistant_widget.complete_tooluse(tc.id)
                 self.post_message(self.ToolCalled(tc.name, tc.arguments, result.output))
                 self._set_status("Responding...")
 
@@ -760,20 +760,19 @@ class Chat(Widget):
             )
 
             full_text = ""
-            stream = None
 
             async for chunk in chain:
                 if self._cancel_requested:
                     break
-                # Initialize markdown stream on first content
-                if stream is None:
-                    stream = assistant_widget.get_markdown_stream()
+                # Get stream (creates new one after tool use)
+                stream = assistant_widget.ensure_stream()
                 await stream.write(chunk)
                 full_text += chunk
 
-            # Close the stream
-            if stream:
-                await stream.stop()
+            # Close the stream and mark message complete
+            if assistant_widget._stream:
+                await assistant_widget._stream.stop()
+            assistant_widget.mark_complete()
 
             # Scroll to bottom
             container = self.query_one("#chat-messages", ScrollableContainer)
@@ -803,9 +802,11 @@ class Chat(Widget):
             self.post_message(self.Responded(full_text))
 
         except asyncio.CancelledError:
+            assistant_widget.mark_complete()
             assistant_widget.update_content("*Cancelled*")
             self._set_status("Cancelled")
         except Exception as e:
+            assistant_widget.mark_complete()
             error_msg = f"Error: {e}"
             assistant_widget.update_error(str(e))
             self._set_status(error_msg)
