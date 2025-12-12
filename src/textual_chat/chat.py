@@ -58,7 +58,17 @@ from textual.widgets.option_list import Option
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
 from .widgets import MessageWidget, ToolUse
-from .llm_adapter import get_async_model, AsyncModel, AsyncConversation, ToolCall, ToolResult
+from . import llm_adapter_litellm
+
+# Default adapter
+_default_adapter = llm_adapter_litellm
+
+# Re-export for backwards compatibility
+get_async_model = llm_adapter_litellm.get_async_model
+AsyncModel = llm_adapter_litellm.AsyncModel
+AsyncConversation = llm_adapter_litellm.AsyncConversation
+ToolCall = llm_adapter_litellm.ToolCall
+ToolResult = llm_adapter_litellm.ToolResult
 
 Role = Literal["user", "assistant", "system", "tool"]
 
@@ -370,6 +380,7 @@ class Chat(Widget):
         self,
         model: str | None = None,
         *,
+        adapter: Literal["litellm", "acp"] | Any = "litellm",
         system: str | None = None,
         placeholder: str = "Message...",
         tools: list[Any] | dict[str, Callable] | None = None,
@@ -390,7 +401,8 @@ class Chat(Widget):
         """Create a chat widget.
 
         Args:
-            model: LLM model (auto-detected if not set)
+            model: LLM model (auto-detected if not set), or agent command for ACP
+            adapter: Backend adapter - "litellm" (default) or "acp", or a module
             system: System prompt
             placeholder: Input placeholder text
             tools: List of functions and/or MCP servers, or dict of name -> function
@@ -406,6 +418,16 @@ class Chat(Widget):
             **llm_kwargs: Extra args passed to LiteLLM
         """
         super().__init__(name=name, id=id, classes=classes)
+
+        # Select adapter
+        if adapter == "litellm":
+            self._adapter = llm_adapter_litellm
+        elif adapter == "acp":
+            from . import llm_adapter_acp
+            self._adapter = llm_adapter_acp
+        else:
+            # Assume it's a module
+            self._adapter = adapter
 
         # Model configuration
         self._model_id = model  # Will use adapter's auto-detect if None
@@ -498,7 +520,7 @@ class Chat(Widget):
         """Initialize model and show status on mount."""
         # Initialize the adapter model
         try:
-            self._model = get_async_model(
+            self._model = self._adapter.get_async_model(
                 self._model_id,
                 api_key=self.api_key,
                 api_base=self.api_base,
@@ -595,7 +617,7 @@ class Chat(Widget):
         if self._model and model_id == self._model.model_id:
             return
         try:
-            self._model = get_async_model(
+            self._model = self._adapter.get_async_model(
                 model_id,
                 api_key=self.api_key,
                 api_base=self.api_base,
