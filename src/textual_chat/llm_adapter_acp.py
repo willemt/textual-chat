@@ -40,7 +40,7 @@ from acp.schema import (
 )
 
 log = logging.getLogger(__name__)
-log.propagate = False
+# log.propagate = False  # TEMPORARILY ENABLED FOR DEBUGGING
 
 
 class CacheDetails(TypedDict, total=False):
@@ -305,6 +305,10 @@ class AsyncChainResponse:
         """Ensure we have a connection and session."""
         conv = self._conversation
 
+        log.warning("========== _ensure_connection CALLED ==========")
+        log.warning(f"Current session_id: {conv._session_id}")
+        log.warning(f"Has _session_loaded attr: {hasattr(conv, '_session_loaded')}")
+
         if conv._conn is None:
             # Parse agent command
             parts = conv.model.agent_command.split()
@@ -350,8 +354,55 @@ class AsyncChainResponse:
 
         if conv._session_id is None:
             # Create new session
+            log.warning("========== CREATING NEW SESSION ==========")
             session = await conv._conn.new_session(cwd=os.getcwd(), mcp_servers=[])
             conv._session_id = session.session_id
+            log.warning(f"Created new session ID: {conv._session_id}")
+        elif conv._session_id and not hasattr(conv, "_session_loaded"):
+            # We have a session ID (from storage) but haven't loaded it yet
+            # Try fork first (undocumented but implemented), then load, then new
+            log.warning("========== ATTEMPTING TO RESTORE EXISTING SESSION ==========")
+            log.warning(f"Trying to restore session ID: {conv._session_id}")
+            log.warning(f"CWD: {os.getcwd()}")
+
+            # Try 1: session/fork (undocumented but exists in agent code)
+            log.warning("🔄 Attempt 1: Trying session/fork via send_request...")
+            try:
+                result = await conv._conn._conn.send_request(
+                    "session/fork",
+                    {
+                        "sessionId": conv._session_id,
+                        "cwd": os.getcwd(),
+                        "mcpServers": [],
+                    },
+                )
+                conv._session_loaded = True
+                log.warning(f"✅ SUCCESS with session/fork!")
+                log.warning(f"Fork response: {result}")
+                if hasattr(result, 'session_id'):
+                    conv._session_id = result.session_id
+                    log.warning(f"New forked session ID: {conv._session_id}")
+            except Exception as e:
+                log.warning(f"❌ session/fork failed: {type(e).__name__}: {e}")
+
+                # Try 2: session/load
+                log.warning("🔄 Attempt 2: Trying session/load...")
+                try:
+                    session = await conv._conn.load_session(
+                        cwd=os.getcwd(), mcp_servers=[], session_id=conv._session_id
+                    )
+                    conv._session_loaded = True
+                    log.warning(f"✅ SUCCESS with session/load!")
+                    log.warning(f"Load response: {session}")
+                except Exception as e2:
+                    log.warning(f"❌ session/load failed: {type(e2).__name__}: {e2}")
+
+                    # Try 3: Create new session
+                    log.warning("🔄 Attempt 3: Creating new session...")
+                    session = await conv._conn.new_session(cwd=os.getcwd(), mcp_servers=[])
+                    conv._session_id = session.session_id
+                    conv._session_loaded = True
+                    log.warning(f"Created new session ID: {conv._session_id}")
 
         # Reset client for this turn
         conv._client.reset_for_turn(

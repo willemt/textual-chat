@@ -758,7 +758,7 @@ class Chat(Widget):
         container.scroll_end(animate=False)
         return widget
 
-    def on_session_prompt_input_session_choice(
+    async def on_session_prompt_input_session_choice(
         self, event: SessionPromptInput.SessionChoice
     ) -> None:
         """Handle session resumption choice."""
@@ -780,11 +780,28 @@ class Chat(Widget):
         if event.resume:
             # Resume the previous session
             prev_session_data = self._session_storage.get_session(self._model.model_id)
+            log.warning(f"========== SESSION RESUME CLICKED ==========")
+            log.warning(f"Previous session data: {prev_session_data}")
             if prev_session_data:
-                # Restore session ID
+                # Restore session ID to try loading it
                 session_id = prev_session_data.get("session_id")
+                log.warning(f"Found session ID in storage: {session_id}")
                 if session_id and hasattr(self._conversation, "_session_id"):
                     self._conversation._session_id = session_id
+                    log.warning(f"✅ Set conversation._session_id to: {session_id}")
+
+                    # IMMEDIATELY trigger session loading by ensuring connection
+                    log.warning("🔄 Triggering immediate session load...")
+                    try:
+                        # Force the conversation to connect and load the session NOW
+                        dummy_chain = self._conversation.chain("", system=self.system)
+                        # Start the iteration to trigger connection
+                        await dummy_chain._ensure_connection()
+                        log.warning("✅ Session load triggered successfully")
+                    except Exception as e:
+                        log.warning(f"❌ Failed to trigger session load: {e}")
+                else:
+                    log.warning(f"❌ Could not set session ID. session_id={session_id}, has_attr={hasattr(self._conversation, '_session_id')}")
 
                 # Restore message history to UI
                 messages = prev_session_data.get("messages", [])
