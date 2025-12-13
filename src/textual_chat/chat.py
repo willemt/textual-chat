@@ -57,8 +57,9 @@ from textual.widgets.option_list import Option
 
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
-from .widgets import MessageWidget, ToolUse
+from .widgets import MessageWidget, ToolUse, SessionPromptInput
 from . import llm_adapter_litellm
+from .session_storage import SessionStorage
 
 # Default adapter
 _default_adapter = llm_adapter_litellm
@@ -450,6 +451,11 @@ class Chat(Widget):
         self._conversation: AsyncConversation | None = None
         self._config_error: str | None = None
 
+        # Session management (for ACP adapter)
+        self._session_storage: SessionStorage | None = None
+        self._pending_session_prompt = False
+        self._message_history: list[dict[str, str]] = []  # Track messages for session persistence
+
         # Tool state
         self._tools: dict[str, Callable] = {}  # Local tools
         self._mcp_servers: list[Any] = []
@@ -530,6 +536,16 @@ class Chat(Widget):
         except ValueError as e:
             self._config_error = str(e)
             self._show_error(self._config_error)
+
+        # Initialize session storage for ACP adapter
+        if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+            self._session_storage = SessionStorage()
+            # Check for previous session
+            if self._model and self._session_storage:
+                prev_session_data = self._session_storage.get_session(self._model.model_id)
+                if prev_session_data:
+                    self._pending_session_prompt = True
+                    self._show_session_prompt_in_input()
 
         # Introspect app and register discovered tools
         if self.introspect:
@@ -709,6 +725,20 @@ class Chat(Widget):
         widget = MessageWidget("error", error)
         container.mount(widget)
 
+    def _show_session_prompt_in_input(self) -> None:
+        """Replace the input with session resumption prompt."""
+        try:
+            # Remove the text input
+            text_input = self.query_one("#chat-input", _ChatInput)
+            text_input.remove()
+
+            # Add the session prompt in its place
+            input_area = self.query_one("#chat-input-area")
+            prompt = SessionPromptInput(id="session-prompt")
+            input_area.mount(prompt)
+        except Exception as e:
+            log.exception(f"Failed to show session prompt: {e}")
+
     def _add_message(
         self,
         role: str,
@@ -728,6 +758,51 @@ class Chat(Widget):
         container.scroll_end(animate=False)
         return widget
 
+    def on_session_prompt_input_session_choice(
+        self, event: SessionPromptInput.SessionChoice
+    ) -> None:
+        """Handle session resumption choice."""
+        self._pending_session_prompt = False
+
+        # Remove the prompt and restore the text input
+        try:
+            prompt = self.query_one("#session-prompt", SessionPromptInput)
+            prompt.remove()
+            input_area = self.query_one("#chat-input-area")
+            input_area.mount(_ChatInput(placeholder=self.placeholder, id="chat-input"))
+        except Exception as e:
+            log.exception(f"Failed to restore input: {e}")
+            return
+
+        if not self._session_storage or not self._model:
+            return
+
+        if event.resume:
+            # Resume the previous session
+            prev_session_data = self._session_storage.get_session(self._model.model_id)
+            if prev_session_data:
+                # Restore session ID
+                session_id = prev_session_data.get("session_id")
+                if session_id and hasattr(self._conversation, "_session_id"):
+                    self._conversation._session_id = session_id
+
+                # Restore message history to UI
+                messages = prev_session_data.get("messages", [])
+                for msg in messages:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    self._add_message(role, content)
+                    # Add to history tracking
+                    self._message_history.append({"role": role, "content": content})
+
+                # Show confirmation
+                if messages:
+                    self._set_status(f"Resumed session with {len(messages)} messages")
+        else:
+            # Start fresh - clear the stored session
+            self._session_storage.clear_session(self._model.model_id)
+            self._set_status("Starting new session")
+
     async def on__chat_input_submitted(self, event: _ChatInput.Submitted) -> None:
         """Handle message submission."""
         content = event.content
@@ -738,6 +813,11 @@ class Chat(Widget):
             self.notify("Please configure an LLM first", severity="error")
             return
 
+        # Don't allow sending while session prompt is pending
+        if self._pending_session_prompt:
+            self.notify("Please choose whether to resume the previous session first", severity="warning")
+            return
+
         await self._send(content)
 
     async def _send(self, content: str) -> None:
@@ -745,8 +825,9 @@ class Chat(Widget):
         self._is_responding = True
         self._cancel_requested = False
 
-        # Add user message to UI
+        # Add user message to UI and history
         self._add_message("user", content)
+        self._message_history.append({"role": "user", "content": content})
         self.post_message(self.Sent(content))
 
         # Show responding indicator with animation
@@ -823,6 +904,17 @@ class Chat(Widget):
             self._set_status("")
             self.post_message(self.Responded(full_text))
 
+            # Track assistant response in history
+            self._message_history.append({"role": "assistant", "content": full_text})
+
+            # Save session ID and message history for ACP adapter
+            if self._session_storage and self._model and hasattr(self._conversation, "_session_id"):
+                session_id = self._conversation._session_id
+                if session_id:
+                    self._session_storage.save_session(
+                        self._model.model_id, session_id, self._message_history
+                    )
+
         except asyncio.CancelledError:
             assistant_widget.mark_complete()
             assistant_widget.update_content("*Cancelled*")
@@ -844,6 +936,11 @@ class Chat(Widget):
         # Reset conversation in adapter
         if self._conversation:
             self._conversation.clear()
+        # Clear message history
+        self._message_history.clear()
+        # Clear stored session for ACP adapter
+        if self._session_storage and self._model:
+            self._session_storage.clear_session(self._model.model_id)
         self._set_status("Cleared")
 
     def action_cancel(self) -> None:
