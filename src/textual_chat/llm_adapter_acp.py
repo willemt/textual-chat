@@ -235,6 +235,7 @@ class AsyncConversation:
         self._conn: Any = None
         self._proc: aio_subprocess.Process | None = None
         self._client: ACPClientHandler | None = None
+        self.agent_name: str | None = None  # Agent name from initialization
 
     def chain(
         self,
@@ -343,14 +344,25 @@ class AsyncChainResponse:
             # Connect to agent
             conv._conn = connect_to_agent(conv._client, conv._proc.stdin, conv._proc.stdout)
 
-            # Initialize
-            await conv._conn.initialize(
+            # Initialize and capture agent info
+            init_response = await conv._conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
                 client_capabilities=ClientCapabilities(),
                 client_info=Implementation(
                     name="textual-chat", title="Textual Chat", version="0.1.0"
                 ),
             )
+
+            # Extract agent name if available (prefer title for display)
+            if hasattr(init_response, 'agent_info'):
+                if hasattr(init_response.agent_info, 'title') and init_response.agent_info.title:
+                    conv.agent_name = init_response.agent_info.title
+                    log.warning(f"Agent title: {conv.agent_name}")
+                elif hasattr(init_response.agent_info, 'name') and init_response.agent_info.name:
+                    conv.agent_name = init_response.agent_info.name
+                    log.warning(f"Agent name: {conv.agent_name}")
+            else:
+                log.warning("No agent_info found in init response")
 
         if conv._session_id is None:
             # Create new session

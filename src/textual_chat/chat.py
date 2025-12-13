@@ -808,7 +808,11 @@ class Chat(Widget):
                 for msg in messages:
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
-                    self._add_message(role, content)
+                    # Use agent name for assistant messages
+                    title = None
+                    if role == "assistant" and hasattr(self._conversation, 'agent_name') and self._conversation.agent_name:
+                        title = self._conversation.agent_name
+                    self._add_message(role, content, title=title)
                     # Add to history tracking
                     self._message_history.append({"role": role, "content": content})
 
@@ -848,7 +852,11 @@ class Chat(Widget):
         self.post_message(self.Sent(content))
 
         # Show responding indicator with animation
-        assistant_widget = self._add_message("assistant", loading=True)
+        # Use agent name if available (ACP agents provide this)
+        agent_title = None
+        if hasattr(self._conversation, 'agent_name') and self._conversation.agent_name:
+            agent_title = self._conversation.agent_name
+        assistant_widget = self._add_message("assistant", loading=True, title=agent_title)
         self._set_status("Responding...")
 
         try:
