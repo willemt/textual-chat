@@ -7,7 +7,8 @@ the LLM to interact with the application.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Label, Static, TabbedContent, TextArea
@@ -16,7 +17,6 @@ from .datatable import create_datatable_tools
 
 if TYPE_CHECKING:
     from textual.app import App
-    from textual.screen import Screen
 
 
 def _sanitize_tool_name(name: str) -> str:
@@ -25,10 +25,10 @@ def _sanitize_tool_name(name: str) -> str:
     Tool names must match: ^[a-zA-Z0-9_-]{1,128}$
     """
     # Replace invalid characters with underscores
-    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
     # Ensure it doesn't start with a digit or hyphen
-    if sanitized and (sanitized[0].isdigit() or sanitized[0] == '-'):
-        sanitized = '_' + sanitized
+    if sanitized and (sanitized[0].isdigit() or sanitized[0] == "-"):
+        sanitized = "_" + sanitized
     # Truncate to 128 chars
     return sanitized[:128]
 
@@ -324,6 +324,7 @@ def _create_screen_tools(app: App) -> dict[str, Callable]:
 
     # Add tools for installed screens
     for screen_name in app._installed_screens:
+
         def push_screen(name: str = screen_name) -> str:
             """Push a screen onto the stack.
 

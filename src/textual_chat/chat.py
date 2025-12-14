@@ -43,7 +43,8 @@ if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
     _llm_handler.setFormatter(logging.Formatter("%(asctime)s\n%(message)s\n"))
     llm_log.addHandler(_llm_handler)
 
-from typing import Any, Callable, Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -55,11 +56,11 @@ from textual.widget import Widget
 from textual.widgets import DataTable, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from .tools.datatable import create_datatable_tools
-from .tools.introspection import introspect_app
-from .widgets import MessageWidget, ToolUse, SessionPromptInput
 from . import llm_adapter_litellm
 from .session_storage import SessionStorage
+from .tools.datatable import create_datatable_tools
+from .tools.introspection import introspect_app
+from .widgets import MessageWidget, SessionPromptInput, ToolUse
 
 # Default adapter
 _default_adapter = llm_adapter_litellm
@@ -126,9 +127,7 @@ class ModelSelectModal(ModalScreen[str | None]):
         Binding("escape", "cancel", "Cancel"),
     ]
 
-    def __init__(
-        self, models: list[tuple[str, str, str]], current: str | None = None
-    ) -> None:
+    def __init__(self, models: list[tuple[str, str, str]], current: str | None = None) -> None:
         """Initialize modal.
 
         Args:
@@ -151,9 +150,7 @@ class ModelSelectModal(ModalScreen[str | None]):
             yield Static("", id="model-info")
             yield Static("[i]Enter to select, Escape to cancel[/i]", id="hint")
 
-    def on_option_list_option_highlighted(
-        self, event: OptionList.OptionHighlighted
-    ) -> None:
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         """Update info when option is highlighted."""
         model_id = event.option.id
         if model_id and model_id in self._model_info:
@@ -394,6 +391,7 @@ class Chat(Widget):
         show_model_selector: bool = True,
         introspect: bool = True,
         introspect_scope: Literal["app", "screen", "parent"] = "app",
+        assistant_name: str | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -416,6 +414,7 @@ class Chat(Widget):
             show_model_selector: Show Ctrl+M to open model selector (default True).
             introspect: Auto-discover app widgets and create tools for LLM (default True).
             introspect_scope: Scope for introspection - "app", "screen", or "parent" (default "app").
+            assistant_name: Override the assistant's display name (defaults to agent name from ACP or "Assistant").
             **llm_kwargs: Extra args passed to LiteLLM
         """
         super().__init__(name=name, id=id, classes=classes)
@@ -425,6 +424,7 @@ class Chat(Widget):
             self._adapter = llm_adapter_litellm
         elif adapter == "acp":
             from . import llm_adapter_acp
+
             self._adapter = llm_adapter_acp
         else:
             # Assume it's a module
@@ -444,6 +444,7 @@ class Chat(Widget):
         self.show_model_selector = show_model_selector
         self.introspect = introspect
         self.introspect_scope = introspect_scope
+        self.assistant_name = assistant_name  # Override for assistant display name
         self.llm_kwargs = llm_kwargs
 
         # Adapter state (initialized in on_mount)
@@ -489,6 +490,18 @@ class Chat(Widget):
                     else:
                         # Assume it's an MCP server
                         self._mcp_servers.append(item)
+
+    def _get_assistant_title(self) -> str | None:
+        """Get the effective assistant title for display.
+
+        Returns the override assistant_name if set, otherwise falls back to
+        the agent name from ACP initialization, or None.
+        """
+        if self.assistant_name:
+            return self.assistant_name
+        if hasattr(self._conversation, "agent_name") and self._conversation.agent_name:
+            return self._conversation.agent_name
+        return None
 
     def _register_tool(self, func: Callable, name: str | None = None) -> None:
         """Register a tool function internally."""
@@ -571,44 +584,54 @@ class Chat(Widget):
 
         # Anthropic models
         if os.getenv("ANTHROPIC_API_KEY"):
-            models.extend([
-                ("Claude Sonnet 4", "claude-sonnet-4-20250514", "Anthropic"),
-                ("Claude Opus 4", "claude-opus-4-20250514", "Anthropic"),
-                ("Claude Haiku 3.5", "claude-3-5-haiku-latest", "Anthropic"),
-            ])
+            models.extend(
+                [
+                    ("Claude Sonnet 4", "claude-sonnet-4-20250514", "Anthropic"),
+                    ("Claude Opus 4", "claude-opus-4-20250514", "Anthropic"),
+                    ("Claude Haiku 3.5", "claude-3-5-haiku-latest", "Anthropic"),
+                ]
+            )
 
         # OpenAI models
         if os.getenv("OPENAI_API_KEY"):
-            models.extend([
-                ("GPT-4o", "gpt-4o", "OpenAI"),
-                ("GPT-4o Mini", "gpt-4o-mini", "OpenAI"),
-                ("GPT-4 Turbo", "gpt-4-turbo", "OpenAI"),
-                ("o1", "o1", "OpenAI"),
-                ("o1-mini", "o1-mini", "OpenAI"),
-            ])
+            models.extend(
+                [
+                    ("GPT-4o", "gpt-4o", "OpenAI"),
+                    ("GPT-4o Mini", "gpt-4o-mini", "OpenAI"),
+                    ("GPT-4 Turbo", "gpt-4-turbo", "OpenAI"),
+                    ("o1", "o1", "OpenAI"),
+                    ("o1-mini", "o1-mini", "OpenAI"),
+                ]
+            )
 
         # Google models
         if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
-            models.extend([
-                ("Gemini 1.5 Flash", "gemini/gemini-1.5-flash", "Google"),
-                ("Gemini 1.5 Pro", "gemini/gemini-1.5-pro", "Google"),
-                ("Gemini 2.0 Flash", "gemini/gemini-2.0-flash-exp", "Google"),
-            ])
+            models.extend(
+                [
+                    ("Gemini 1.5 Flash", "gemini/gemini-1.5-flash", "Google"),
+                    ("Gemini 1.5 Pro", "gemini/gemini-1.5-pro", "Google"),
+                    ("Gemini 2.0 Flash", "gemini/gemini-2.0-flash-exp", "Google"),
+                ]
+            )
 
         # Groq models
         if os.getenv("GROQ_API_KEY"):
-            models.extend([
-                ("Llama 3.1 8B (Groq)", "groq/llama-3.1-8b-instant", "Groq"),
-                ("Llama 3.1 70B (Groq)", "groq/llama-3.1-70b-versatile", "Groq"),
-                ("Mixtral 8x7B (Groq)", "groq/mixtral-8x7b-32768", "Groq"),
-            ])
+            models.extend(
+                [
+                    ("Llama 3.1 8B (Groq)", "groq/llama-3.1-8b-instant", "Groq"),
+                    ("Llama 3.1 70B (Groq)", "groq/llama-3.1-70b-versatile", "Groq"),
+                    ("Mixtral 8x7B (Groq)", "groq/mixtral-8x7b-32768", "Groq"),
+                ]
+            )
 
         # DeepSeek models
         if os.getenv("DEEPSEEK_API_KEY"):
-            models.extend([
-                ("DeepSeek Chat", "deepseek/deepseek-chat", "DeepSeek"),
-                ("DeepSeek Coder", "deepseek/deepseek-coder", "DeepSeek"),
-            ])
+            models.extend(
+                [
+                    ("DeepSeek Chat", "deepseek/deepseek-chat", "DeepSeek"),
+                    ("DeepSeek Coder", "deepseek/deepseek-coder", "DeepSeek"),
+                ]
+            )
 
         return models
 
@@ -674,6 +697,7 @@ class Chat(Widget):
 
     def _make_mcp_wrapper(self, client: Any, name: str, description: str | None) -> Callable:
         """Create an MCP tool wrapper function with proper closure capture."""
+
         async def wrapper(**kwargs) -> str:
             result = await client.call_tool(name, kwargs)
             if hasattr(result, "content"):
@@ -745,8 +769,8 @@ class Chat(Widget):
         content: str = "",
         loading: bool = False,
         title: str | None = None,
-        before: "MessageWidget | None" = None,
-    ) -> "MessageWidget":
+        before: MessageWidget | None = None,
+    ) -> MessageWidget:
         """Add a message to the UI."""
         container = self.query_one("#chat-messages", ScrollableContainer)
         widget = MessageWidget(role, content, loading=loading, title=title)
@@ -780,7 +804,7 @@ class Chat(Widget):
         if event.resume:
             # Resume the previous session
             prev_session_data = self._session_storage.get_session(self._model.model_id)
-            log.warning(f"========== SESSION RESUME CLICKED ==========")
+            log.warning("========== SESSION RESUME CLICKED ==========")
             log.warning(f"Previous session data: {prev_session_data}")
             if prev_session_data:
                 # Restore session ID to try loading it
@@ -801,17 +825,19 @@ class Chat(Widget):
                     except Exception as e:
                         log.warning(f"❌ Failed to trigger session load: {e}")
                 else:
-                    log.warning(f"❌ Could not set session ID. session_id={session_id}, has_attr={hasattr(self._conversation, '_session_id')}")
+                    log.warning(
+                        f"❌ Could not set session ID. session_id={session_id}, has_attr={hasattr(self._conversation, '_session_id')}"
+                    )
 
                 # Restore message history to UI
                 messages = prev_session_data.get("messages", [])
                 for msg in messages:
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
-                    # Use agent name for assistant messages
+                    # Use assistant name for assistant messages
                     title = None
-                    if role == "assistant" and hasattr(self._conversation, 'agent_name') and self._conversation.agent_name:
-                        title = self._conversation.agent_name
+                    if role == "assistant":
+                        title = self._get_assistant_title()
                     self._add_message(role, content, title=title)
                     # Add to history tracking
                     self._message_history.append({"role": role, "content": content})
@@ -836,7 +862,9 @@ class Chat(Widget):
 
         # Don't allow sending while session prompt is pending
         if self._pending_session_prompt:
-            self.notify("Please choose whether to resume the previous session first", severity="warning")
+            self.notify(
+                "Please choose whether to resume the previous session first", severity="warning"
+            )
             return
 
         await self._send(content)
@@ -852,10 +880,8 @@ class Chat(Widget):
         self.post_message(self.Sent(content))
 
         # Show responding indicator with animation
-        # Use agent name if available (ACP agents provide this)
-        agent_title = None
-        if hasattr(self._conversation, 'agent_name') and self._conversation.agent_name:
-            agent_title = self._conversation.agent_name
+        # Use assistant name (from override or ACP agent)
+        agent_title = self._get_assistant_title()
         assistant_widget = self._add_message("assistant", loading=True, title=agent_title)
         self._set_status("Responding...")
 
@@ -914,10 +940,9 @@ class Chat(Widget):
                     last_usage = usage
 
             if last_usage:
-                cached = (
-                    last_usage.details.get("cache_read_input_tokens", 0)
-                    or last_usage.details.get("cached_tokens", 0)
-                )
+                cached = last_usage.details.get(
+                    "cache_read_input_tokens", 0
+                ) or last_usage.details.get("cached_tokens", 0)
                 llm_log.debug(
                     f"=== Token Usage ===\n"
                     f"Input: {last_usage.input}, Output: {last_usage.output}, Cached: {cached}"

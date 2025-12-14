@@ -16,28 +16,27 @@ Requires: pip install agent-client-protocol
 from __future__ import annotations
 
 import asyncio
-import asyncio.subprocess as aio_subprocess
 import logging
 import os
-import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, TypedDict
+from typing import Any, TypedDict
 
-from acp import PROTOCOL_VERSION, Client, connect_to_agent, text_block
+from acp import Client, text_block
 from acp.schema import (
     AgentMessageChunk,
-    AgentThoughtChunk,
     AgentPlanUpdate,
+    AgentThoughtChunk,
     AvailableCommandsUpdate,
-    ClientCapabilities,
     CurrentModeUpdate,
-    Implementation,
     TextContentBlock,
-    ToolCallStart,
     ToolCallProgress,
+    ToolCallStart,
     UserMessageChunk,
 )
+
+from .agent_manager import get_agent_manager
+from .session_storage import get_session_storage
 
 log = logging.getLogger(__name__)
 # log.propagate = False  # TEMPORARILY ENABLED FOR DEBUGGING
@@ -55,7 +54,7 @@ class Usage:
 
     input: int = 0
     output: int = 0
-    details: CacheDetails = field(default_factory=dict)
+    details: CacheDetails = field(default_factory=lambda: CacheDetails())
 
 
 @dataclass
@@ -97,9 +96,13 @@ class AsyncModel:
         self.agent_command = agent_command
         self.is_claude = False  # ACP agents handle their own caching
 
-    def conversation(self) -> AsyncConversation:
-        """Create a new conversation (ACP session)."""
-        return AsyncConversation(self)
+    def conversation(self, cwd: str | None = None) -> AsyncConversation:
+        """Create a new conversation (ACP session).
+
+        Args:
+            cwd: Working directory for the agent session. Defaults to current directory.
+        """
+        return AsyncConversation(self, cwd=cwd)
 
     # Alias for ACP terminology
     session = conversation
@@ -141,6 +144,8 @@ class ACPClientHandler(Client):
         **kwargs: Any,
     ) -> None:
         """Handle session updates from the agent."""
+        log.debug(f"📨 session_update received: {type(update).__name__}")
+
         if isinstance(update, AgentMessageChunk):
             # Text streaming
             content = update.content
@@ -157,7 +162,7 @@ class ACPClientHandler(Client):
                 tc = ToolCall(
                     id=tool_call_id,
                     name=update.title or "",
-                    arguments=update.raw_input if isinstance(update.raw_input, dict) else {},
+                    arguments=(update.raw_input if isinstance(update.raw_input, dict) else {}),
                 )
                 self._tool_calls[tool_call_id] = tc
 
@@ -178,7 +183,9 @@ class ACPClientHandler(Client):
                 if asyncio.iscoroutine(result):
                     await result
 
-    async def request_permission(self, options: Any, session_id: str, tool_call: Any, **kwargs: Any):
+    async def request_permission(
+        self, options: Any, session_id: str, tool_call: Any, **kwargs: Any
+    ):
         """Handle permission requests - auto-approve for now."""
         return {"outcome": {"outcome": "approved"}}
 
@@ -189,7 +196,12 @@ class ACPClientHandler(Client):
         raise RequestError.method_not_found("fs/write_text_file")
 
     async def read_text_file(
-        self, path: str, session_id: str, limit: int | None = None, line: int | None = None, **kwargs: Any
+        self,
+        path: str,
+        session_id: str,
+        limit: int | None = None,
+        line: int | None = None,
+        **kwargs: Any,
     ):
         from acp import RequestError
 
@@ -229,13 +241,28 @@ class ACPClientHandler(Client):
 class AsyncConversation:
     """Manages conversation with an ACP agent."""
 
-    def __init__(self, model: AsyncModel):
+    def __init__(self, model: AsyncModel, cwd: str | None = None):
         self.model = model
-        self._session_id: str | None = None
-        self._conn: Any = None
-        self._proc: aio_subprocess.Process | None = None
-        self._client: ACPClientHandler | None = None
+        self._conn: Any = None  # Shared connection (managed by AgentManager)
+        self._client: ACPClientHandler | None = None  # Shared client handler
         self.agent_name: str | None = None  # Agent name from initialization
+        self._cwd: str = cwd or os.getcwd()  # Working directory for agent sessions
+        self.init_response: Any = None  # Store initialization response with capabilities
+        self._session_loaded: bool = False  # Whether session has been loaded/forked
+
+        # Check if we have an existing session for this working directory
+        storage = get_session_storage()
+        self._session_id: str | None = storage.get_session_id(self._cwd)
+
+        if self._session_id:
+            log.warning(
+                f"🔍 AsyncConversation.__init__: Found existing session {self._session_id} for {self._cwd}"
+            )
+        else:
+            log.warning(f"🔍 AsyncConversation.__init__: No existing session for {self._cwd}")
+
+        # If we loaded a session ID, don't mark it as loaded yet
+        # This will trigger the fork/restore logic in _ensure_connection
 
     def chain(
         self,
@@ -268,18 +295,34 @@ class AsyncConversation:
             after_call=after_call,
         )
 
+    async def ensure_connected(self) -> None:
+        """Ensure connection is established (for getting init info before first prompt)."""
+        if self._conn is None:
+            # Get shared connection from agent manager
+            agent_manager = get_agent_manager()
+            shared_conn = agent_manager.get_connection(self.model.agent_command)
+
+            # Ensure the shared connection is initialized
+            self._conn = await shared_conn.ensure_connected()
+
+            # Use the shared client handler
+            self._client = shared_conn._client
+
+            # Copy agent info from shared connection
+            self.init_response = shared_conn.init_response
+            self.agent_name = shared_conn.agent_name
+
     def clear(self) -> None:
         """Clear conversation - creates new session on next prompt."""
         self._session_id = None
 
     async def close(self) -> None:
-        """Close the connection and terminate the agent process."""
-        if self._proc and self._proc.returncode is None:
-            self._proc.terminate()
-            try:
-                await self._proc.wait()
-            except ProcessLookupError:
-                pass
+        """Close this conversation (but keep shared agent connection alive)."""
+        # Don't terminate the shared agent process - it's managed by AgentManager
+        # Just clear our reference to the session
+        log.info(f"Closing conversation for session: {self._session_id}")
+        # Session remains alive in the agent for potential forking
+        self._session_id = None
 
 
 class AsyncChainResponse:
@@ -311,71 +354,42 @@ class AsyncChainResponse:
         log.warning(f"Has _session_loaded attr: {hasattr(conv, '_session_loaded')}")
 
         if conv._conn is None:
-            # Parse agent command
-            parts = conv.model.agent_command.split()
-            program = parts[0]
-            args = parts[1:] if len(parts) > 1 else []
+            # Get shared connection from agent manager
+            agent_manager = get_agent_manager()
+            shared_conn = agent_manager.get_connection(conv.model.agent_command)
 
-            program_path = Path(program)
-            spawn_program = program
-            spawn_args = args
+            # Ensure the shared connection is initialized
+            conv._conn = await shared_conn.ensure_connected()
 
-            # If it's a Python file, run with interpreter
-            if program_path.exists() and not os.access(program_path, os.X_OK):
-                spawn_program = sys.executable
-                spawn_args = [str(program_path), *args]
+            # Use the shared client handler
+            conv._client = shared_conn._client
 
-            # Spawn agent process
-            # Redirect stderr to devnull to avoid TUI interference
-            conv._proc = await asyncio.create_subprocess_exec(
-                spawn_program,
-                *spawn_args,
-                stdin=aio_subprocess.PIPE,
-                stdout=aio_subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
+            # Copy agent info from shared connection
+            conv.init_response = shared_conn.init_response
+            conv.agent_name = shared_conn.agent_name
 
-            if conv._proc.stdin is None or conv._proc.stdout is None:
-                raise RuntimeError("Agent process does not expose stdio pipes")
-
-            # Create client handler (stored on conversation, reused across turns)
-            conv._client = ACPClientHandler()
-
-            # Connect to agent
-            conv._conn = connect_to_agent(conv._client, conv._proc.stdin, conv._proc.stdout)
-
-            # Initialize and capture agent info
-            init_response = await conv._conn.initialize(
-                protocol_version=PROTOCOL_VERSION,
-                client_capabilities=ClientCapabilities(),
-                client_info=Implementation(
-                    name="textual-chat", title="Textual Chat", version="0.1.0"
-                ),
-            )
-
-            # Extract agent name if available (prefer title for display)
-            if hasattr(init_response, 'agent_info'):
-                if hasattr(init_response.agent_info, 'title') and init_response.agent_info.title:
-                    conv.agent_name = init_response.agent_info.title
-                    log.warning(f"Agent title: {conv.agent_name}")
-                elif hasattr(init_response.agent_info, 'name') and init_response.agent_info.name:
-                    conv.agent_name = init_response.agent_info.name
-                    log.warning(f"Agent name: {conv.agent_name}")
-            else:
-                log.warning("No agent_info found in init response")
+            log.warning(f"Using shared connection for: {conv.model.agent_command}")
+            log.warning(f"Agent name: {conv.agent_name}")
 
         if conv._session_id is None:
             # Create new session
             log.warning("========== CREATING NEW SESSION ==========")
-            session = await conv._conn.new_session(cwd=os.getcwd(), mcp_servers=[])
+            session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
             conv._session_id = session.session_id
+            conv._session_loaded = True  # Mark as loaded so we don't try to restore it
             log.warning(f"Created new session ID: {conv._session_id}")
-        elif conv._session_id and not hasattr(conv, "_session_loaded"):
+            log.warning(f"Session CWD: {conv._cwd}")
+
+            # Store in session storage for reuse
+            storage = get_session_storage()
+            if conv._session_id:
+                storage.store_session_id(conv._cwd, conv._session_id)
+        elif conv._session_id and not conv._session_loaded:
             # We have a session ID (from storage) but haven't loaded it yet
             # Try fork first (undocumented but implemented), then load, then new
             log.warning("========== ATTEMPTING TO RESTORE EXISTING SESSION ==========")
             log.warning(f"Trying to restore session ID: {conv._session_id}")
-            log.warning(f"CWD: {os.getcwd()}")
+            log.warning(f"CWD: {conv._cwd}")
 
             # Try 1: session/fork (undocumented but exists in agent code)
             log.warning("🔄 Attempt 1: Trying session/fork via send_request...")
@@ -384,16 +398,30 @@ class AsyncChainResponse:
                     "session/fork",
                     {
                         "sessionId": conv._session_id,
-                        "cwd": os.getcwd(),
+                        "cwd": conv._cwd,
                         "mcpServers": [],
                     },
                 )
                 conv._session_loaded = True
-                log.warning(f"✅ SUCCESS with session/fork!")
-                log.warning(f"Fork response: {result}")
-                if hasattr(result, 'session_id'):
-                    conv._session_id = result.session_id
-                    log.warning(f"New forked session ID: {conv._session_id}")
+                log.info("✅ Session forked successfully")
+
+                # Extract new session ID from fork response (could be dict or object)
+                new_session_id = None
+                if isinstance(result, dict):
+                    new_session_id = result.get("sessionId") or result.get("session_id")
+                elif hasattr(result, "session_id"):
+                    new_session_id = result.session_id
+                elif hasattr(result, "sessionId"):
+                    new_session_id = result.sessionId
+
+                if new_session_id and new_session_id != conv._session_id:
+                    log.info(f"   Forked session ID: {conv._session_id} → {new_session_id}")
+                    conv._session_id = new_session_id
+
+                # Update session storage with (possibly new) forked session ID
+                storage = get_session_storage()
+                if conv._session_id:
+                    storage.store_session_id(conv._cwd, conv._session_id)
             except Exception as e:
                 log.warning(f"❌ session/fork failed: {type(e).__name__}: {e}")
 
@@ -401,27 +429,39 @@ class AsyncChainResponse:
                 log.warning("🔄 Attempt 2: Trying session/load...")
                 try:
                     session = await conv._conn.load_session(
-                        cwd=os.getcwd(), mcp_servers=[], session_id=conv._session_id
+                        cwd=conv._cwd, mcp_servers=[], session_id=conv._session_id
                     )
                     conv._session_loaded = True
-                    log.warning(f"✅ SUCCESS with session/load!")
+                    log.warning("✅ SUCCESS with session/load!")
                     log.warning(f"Load response: {session}")
+                    # Session ID stays the same after load
                 except Exception as e2:
                     log.warning(f"❌ session/load failed: {type(e2).__name__}: {e2}")
 
-                    # Try 3: Create new session
+                    # Try 3: Create new session (fallback after restore failed)
                     log.warning("🔄 Attempt 3: Creating new session...")
-                    session = await conv._conn.new_session(cwd=os.getcwd(), mcp_servers=[])
+                    session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
                     conv._session_id = session.session_id
-                    conv._session_loaded = True
+                    # Don't set _session_loaded = True here, since we failed to restore
+                    # and created a new session instead
                     log.warning(f"Created new session ID: {conv._session_id}")
+                    log.warning(f"Session CWD: {conv._cwd}")
+
+                    # Update session storage with new session ID
+                    storage = get_session_storage()
+                    if conv._session_id:
+                        storage.store_session_id(conv._cwd, conv._session_id)
 
         # Reset client for this turn
-        conv._client.reset_for_turn(
-            before_call=self._before_call,
-            after_call=self._after_call,
-        )
+        if conv._client:
+            conv._client.reset_for_turn(
+                before_call=self._before_call,
+                after_call=self._after_call,
+            )
 
+        # Ensure types are correct for return
+        assert conv._session_id is not None
+        assert conv._client is not None
         return conv._conn, conv._session_id, conv._client
 
     async def __aiter__(self):

@@ -18,8 +18,9 @@ import inspect
 import json
 import logging
 import os
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, get_type_hints, AsyncGenerator, TypedDict
+from typing import Any, TypedDict, get_type_hints
 
 import litellm
 from litellm import acompletion
@@ -38,6 +39,7 @@ log.propagate = False
 
 class CacheDetails(TypedDict, total=False):
     """Cache-related token details."""
+
     cached_tokens: int  # OpenAI format
     cache_read_input_tokens: int  # Anthropic format
     cache_creation_input_tokens: int  # Anthropic format
@@ -62,6 +64,7 @@ def _extract_cache_details(usage: Any) -> CacheDetails:
 @dataclass
 class Usage:
     """Token usage information."""
+
     input: int = 0
     output: int = 0
     details: CacheDetails = field(default_factory=dict)
@@ -70,6 +73,7 @@ class Usage:
 @dataclass
 class ToolCall:
     """Represents a tool call from the model."""
+
     id: str
     name: str
     arguments: dict[str, Any]
@@ -78,6 +82,7 @@ class ToolCall:
 @dataclass
 class ToolResult:
     """Result from executing a tool."""
+
     tool_call_id: str
     output: str
 
@@ -161,6 +166,7 @@ def _detect_model() -> tuple[str | None, str | None]:
     # Check for Ollama
     try:
         import httpx
+
         resp = httpx.get("http://localhost:11434/api/tags", timeout=0.5)
         if resp.status_code == 200:
             tags = resp.json().get("models", [])
@@ -400,40 +406,45 @@ class AsyncChainResponse:
             if not tool_calls_data or not any(tc["name"] for tc in tool_calls_data):
                 # Record assistant message
                 if full_content:
-                    self._conversation._messages.append({
-                        "role": "assistant",
-                        "content": full_content,
-                    })
+                    self._conversation._messages.append(
+                        {
+                            "role": "assistant",
+                            "content": full_content,
+                        }
+                    )
                 break
 
             # Record assistant message with tool calls
-            self._conversation._messages.append({
-                "role": "assistant",
-                "content": full_content or None,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        },
-                    }
-                    for tc in tool_calls_data
-                    if tc["name"]
-                ],
-            })
+            self._conversation._messages.append(
+                {
+                    "role": "assistant",
+                    "content": full_content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                        for tc in tool_calls_data
+                        if tc["name"]
+                    ],
+                }
+            )
 
             async for tool_call, tool_result in self.do_tool_calls(tool_calls_data):
-                self._conversation._messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result.output,
-                })
+                self._conversation._messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result.output,
+                    }
+                )
 
     async def do_tool_calls(
-        self,
-        tool_calls_data: list[dict[str, Any]]
+        self, tool_calls_data: list[dict[str, Any]]
     ) -> AsyncGenerator[tuple[ToolCall, ToolResult], None]:
         """Execute tool calls: sync tools first, then async tools in parallel."""
 
@@ -509,7 +520,6 @@ class AsyncChainResponse:
                     await result
 
             yield tc, tool_result
-
 
     async def responses(self):
         """Iterate over response objects (for usage info)."""

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -46,9 +46,7 @@ class MCPClient:
 
     def __init__(self) -> None:
         self._sessions: dict[str, ClientSession] = {}
-        self._tools: dict[str, tuple[str, MCPTool]] = (
-            {}
-        )  # tool_name -> (server_name, tool)
+        self._tools: dict[str, tuple[str, MCPTool]] = {}  # tool_name -> (server_name, tool)
         self._cleanup_tasks: list[Any] = []
 
     @asynccontextmanager
@@ -147,11 +145,7 @@ class MCPClient:
             List of available resources
         """
         resources = []
-        sessions = (
-            {server_name: self._sessions[server_name]}
-            if server_name
-            else self._sessions
-        )
+        sessions = {server_name: self._sessions[server_name]} if server_name else self._sessions
 
         for session in sessions.values():
             try:

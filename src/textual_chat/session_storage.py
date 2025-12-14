@@ -1,9 +1,17 @@
-"""Session storage for persisting ACP session IDs and conversation history."""
+"""Session storage for ACP conversations.
+
+Maps working directories to ACP session IDs, enabling session forking
+so agents can maintain context across multiple chat windows.
+
+Also supports legacy agent_command-based storage for backwards compatibility.
+
+Uses SQLite for persistence across app restarts.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -11,57 +19,150 @@ log = logging.getLogger(__name__)
 
 
 class SessionStorage:
-    """Manages persistent storage of ACP session IDs and conversation history."""
+    """Stores session IDs per working directory for reuse/forking.
 
-    def __init__(self, storage_dir: Path | None = None):
-        """Initialize session storage.
+    Uses SQLite database for persistence across app restarts.
+    Supports both working directory-based and agent_command-based storage.
+    """
+
+    def __init__(self, db_path: Path | None = None, clear_on_init: bool = False):
+        # Use XDG cache dir or fallback to home
+        if db_path is None:
+            cache_dir = Path.home() / ".cache" / "textual-chat"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            db_path = cache_dir / "acp_sessions.db"
+
+        self.db_path = db_path
+        self._init_db()
+
+        # Clear stale sessions on initialization (app startup)
+        # Sessions don't survive agent process restarts
+        if clear_on_init:
+            count = self.clear_all_sessions()
+            if count > 0:
+                log.info(f"Cleared {count} stale session(s) from previous app run")
+
+    def _init_db(self) -> None:
+        """Initialize the database schema."""
+        with sqlite3.connect(self.db_path) as conn:
+            # Working directory-based sessions (new API)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    working_dir TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+            # Agent command-based sessions (legacy API for chat.py)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    agent_command TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    messages TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+            conn.commit()
+        log.info(f"Session database initialized at: {self.db_path}")
+
+    # ========== New API (working directory-based) ==========
+
+    def get_session_id(self, cwd: str | None) -> str | None:
+        """Get existing session ID for a working directory.
 
         Args:
-            storage_dir: Directory to store session data.
-                        Defaults to ~/.config/textual-chat/
+            cwd: Working directory path
+
+        Returns:
+            Session ID if one exists, None otherwise
         """
-        if storage_dir is None:
-            storage_dir = Path.home() / ".config" / "textual-chat"
+        if not cwd:
+            log.warning("❌ get_session_id: cwd is None")
+            return None
 
-        self.storage_dir = storage_dir
-        self.sessions_file = storage_dir / "sessions.json"
+        # Normalize path
+        normalized = str(Path(cwd).resolve())
 
-        # Ensure storage directory exists
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT session_id FROM sessions WHERE working_dir = ?", (normalized,)
+            )
+            row = cursor.fetchone()
+
+        if row:
+            session_id: str = row[0]
+            log.warning(f"✅ Found existing session {session_id} for {normalized}")
+            return session_id
+        else:
+            log.warning(f"❌ No existing session for {normalized}")
+            return None
+
+    def store_session_id(self, cwd: str | None, session_id: str) -> None:
+        """Store a session ID for a working directory.
+
+        Args:
+            cwd: Working directory path
+            session_id: ACP session ID to store
+        """
+        if not cwd:
+            log.warning(f"❌ store_session_id: cwd is None, cannot store {session_id}")
+            return
+
+        # Normalize path
+        normalized = str(Path(cwd).resolve())
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (working_dir, session_id, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(working_dir) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (normalized, session_id),
+            )
+            conn.commit()
+
+        log.warning(f"💾 Stored session {session_id} for {normalized}")
+
+    # ========== Legacy API (agent_command-based, for chat.py) ==========
 
     def save_session(
         self, agent_command: str, session_id: str, messages: list[dict[str, str]] | None = None
     ) -> None:
-        """Save a session ID and messages for a specific agent.
+        """Save a session ID and messages for a specific agent (legacy API).
 
         Args:
             agent_command: The agent command (used as key)
             session_id: The ACP session ID to persist
-            messages: Optional list of messages to store (format: [{"role": "user", "content": "..."}])
+            messages: Optional list of messages to store
         """
-        try:
-            # Load existing sessions
-            sessions = self._load_sessions()
+        import json
 
-            # Update with new session
-            session_data = {
-                "session_id": session_id,
-                "agent_command": agent_command,
-            }
-            if messages is not None:
-                session_data["messages"] = messages
+        with sqlite3.connect(self.db_path) as conn:
+            messages_json = json.dumps(messages) if messages else None
+            conn.execute(
+                """
+                INSERT INTO agent_sessions (agent_command, session_id, messages, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(agent_command) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    messages = excluded.messages,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (agent_command, session_id, messages_json),
+            )
+            conn.commit()
 
-            sessions[agent_command] = session_data
-
-            # Write back to disk
-            self.sessions_file.write_text(json.dumps(sessions, indent=2))
-            log.debug(f"Saved session {session_id} for {agent_command}")
-
-        except Exception as e:
-            log.warning(f"Failed to save session: {e}")
+        log.debug(f"Saved session {session_id} for {agent_command}")
 
     def get_session(self, agent_command: str) -> dict[str, Any] | None:
-        """Get the last session data for a specific agent.
+        """Get the last session data for a specific agent (legacy API).
 
         Args:
             agent_command: The agent command (used as key)
@@ -69,39 +170,94 @@ class SessionStorage:
         Returns:
             Dict with "session_id" and optionally "messages" if found, None otherwise
         """
-        try:
-            sessions = self._load_sessions()
-            return sessions.get(agent_command)
-        except Exception as e:
-            log.warning(f"Failed to load session: {e}")
-            return None
+        import json
 
-    def clear_session(self, agent_command: str) -> None:
-        """Clear the saved session for a specific agent.
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT session_id, messages FROM agent_sessions WHERE agent_command = ?",
+                (agent_command,),
+            )
+            row = cursor.fetchone()
+
+        if row:
+            session_id, messages_json = row
+            result: dict[str, Any] = {"session_id": session_id}
+            if messages_json:
+                try:
+                    result["messages"] = json.loads(messages_json)
+                except json.JSONDecodeError:
+                    pass
+            return result
+        return None
+
+    # ========== Common API ==========
+
+    def clear_session(self, cwd_or_agent: str | None) -> None:
+        """Clear stored session for a working directory or agent command.
 
         Args:
-            agent_command: The agent command (used as key)
+            cwd_or_agent: Working directory path or agent command
         """
-        try:
-            sessions = self._load_sessions()
-            if agent_command in sessions:
-                del sessions[agent_command]
-                self.sessions_file.write_text(json.dumps(sessions, indent=2))
-                log.debug(f"Cleared session for {agent_command}")
-        except Exception as e:
-            log.warning(f"Failed to clear session: {e}")
+        if not cwd_or_agent:
+            return
 
-    def _load_sessions(self) -> dict[str, Any]:
-        """Load all sessions from disk.
+        with sqlite3.connect(self.db_path) as conn:
+            # Try both tables
+            # Try as working directory
+            try:
+                normalized = str(Path(cwd_or_agent).resolve())
+                cursor = conn.execute(
+                    "DELETE FROM sessions WHERE working_dir = ? RETURNING session_id",
+                    (normalized,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    log.info(f"Cleared session {row[0]} for working dir {normalized}")
+            except:
+                pass
+
+            # Try as agent command
+            cursor = conn.execute(
+                "DELETE FROM agent_sessions WHERE agent_command = ? RETURNING session_id",
+                (cwd_or_agent,),
+            )
+            row = cursor.fetchone()
+            if row:
+                log.info(f"Cleared session {row[0]} for agent {cwd_or_agent}")
+
+            conn.commit()
+
+    def clear_all_sessions(self) -> int:
+        """Clear all stored sessions (useful on app startup).
 
         Returns:
-            Dictionary mapping agent commands to session data
+            Number of sessions cleared
         """
-        if not self.sessions_file.exists():
-            return {}
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM sessions")
+            result = cursor.fetchone()
+            count1: int = result[0] if result else 0
 
-        try:
-            return json.loads(self.sessions_file.read_text())
-        except (json.JSONDecodeError, OSError) as e:
-            log.warning(f"Failed to load sessions file: {e}")
-            return {}
+            cursor = conn.execute("SELECT COUNT(*) FROM agent_sessions")
+            result = cursor.fetchone()
+            count2: int = result[0] if result else 0
+
+            conn.execute("DELETE FROM sessions")
+            conn.execute("DELETE FROM agent_sessions")
+            conn.commit()
+
+        total = count1 + count2
+        if total > 0:
+            log.info(
+                f"Cleared {total} sessions from database ({count1} cwd-based, {count2} agent-based)"
+            )
+        return total
+
+
+# Global session storage instance
+_storage = SessionStorage()
+
+
+def get_session_storage() -> SessionStorage:
+    """Get the global session storage instance."""
+    return _storage

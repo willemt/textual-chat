@@ -3,15 +3,14 @@
 Provides tools that allow LLMs to query and manipulate Textual DataTable widgets.
 """
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from rich.text import Text
 from textual.widgets import DataTable
 
 
-def create_datatable_tools(
-    table: DataTable, name: str = "table"
-) -> dict[str, Callable]:
+def create_datatable_tools(table: DataTable, name: str = "table") -> dict[str, Callable]:
     """Create tool functions for accessing a DataTable.
 
     Args:
@@ -54,7 +53,7 @@ def create_datatable_tools(
         columns = [str(col.label) for col in table.columns.values()]
         row_keys = list(table.rows.keys())
         if index < 0 or index >= len(row_keys):
-            return {"error": f"Row index {index} out of range (0-{len(row_keys)-1})"}
+            return {"error": f"Row index {index} out of range (0-{len(row_keys) - 1})"}
         row_key = row_keys[index]
         row_data = {}
         for i, col_key in enumerate(table.columns):
@@ -78,7 +77,7 @@ def create_datatable_tools(
             return f"Column '{column}' not found. Available: {columns}"
         row_keys = list(table.rows.keys())
         if row_index < 0 or row_index >= len(row_keys):
-            return f"Row index {row_index} out of range (0-{len(row_keys)-1})"
+            return f"Row index {row_index} out of range (0-{len(row_keys) - 1})"
         row_key = row_keys[row_index]
         col_key = list(table.columns.keys())[columns.index(column)]
         current_value = table.get_cell(row_key, col_key)
@@ -98,7 +97,7 @@ def create_datatable_tools(
         """
         row_keys = list(table.rows.keys())
         if row_index < 0 or row_index >= len(row_keys):
-            return f"Row index {row_index} out of range (0-{len(row_keys)-1})"
+            return f"Row index {row_index} out of range (0-{len(row_keys) - 1})"
         row_key = row_keys[row_index]
         for col_key in table.columns:
             current_value = table.get_cell(row_key, col_key)
@@ -121,7 +120,7 @@ def create_datatable_tools(
             return f"Column '{column}' not found. Available: {columns}"
         row_keys = list(table.rows.keys())
         if row_index < 0 or row_index >= len(row_keys):
-            return f"Row index {row_index} out of range (0-{len(row_keys)-1})"
+            return f"Row index {row_index} out of range (0-{len(row_keys) - 1})"
         col_index = columns.index(column)
         table.cursor_coordinate = (row_index, col_index)
         table.focus()

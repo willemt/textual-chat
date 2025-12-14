@@ -13,14 +13,17 @@ That's it. See https://github.com/your/textual-chat for more.
 """
 
 # The only import most people need
-from .chat import Chat, INLINE, SEPARATE
+# Re-export Golden for convenience
+from textual_golden import Golden
+
+from .agent_manager import get_agent_manager
+from .chat import INLINE, SEPARATE, Chat
 
 # Advanced components (most users won't need these)
 from .db import ChatDatabase, Conversation, Message
+from .llm_adapter_acp import get_async_model
+from .session_storage import get_session_storage
 from .widgets import MessageWidget, ToolUse
-
-# Re-export Golden for convenience
-from textual_golden import Golden
 
 __version__ = "0.1.0"
 __all__ = [
@@ -33,4 +36,7 @@ __all__ = [
     "MessageWidget",
     "ToolUse",
     "Golden",
+    "get_async_model",
+    "get_agent_manager",
+    "get_session_storage",
 ]

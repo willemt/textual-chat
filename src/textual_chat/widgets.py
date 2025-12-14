@@ -202,7 +202,7 @@ class PersistentChatView(ChatView):
 
     def __init__(
         self,
-        db: "ChatDatabase",
+        db: ChatDatabase,
         *,
         conversation_id: str | None = None,
         placeholder: str = "Type a message...",
@@ -236,9 +236,7 @@ class PersistentChatView(ChatView):
             self.load_conversation(self._conversation_id)
             self._pending_load = False
 
-    def new_conversation(
-        self, name: str | None = None, model: str | None = None
-    ) -> str:
+    def new_conversation(self, name: str | None = None, model: str | None = None) -> str:
         """Start a new conversation.
 
         Args:
@@ -273,9 +271,7 @@ class PersistentChatView(ChatView):
         # Load all messages into the view
         container = self.query_one("#chat-messages", ScrollableContainer)
         for msg in conversation.messages:
-            message_data = ChatMessageData(
-                role=msg.role, content=msg.content, id=msg.id
-            )
+            message_data = ChatMessageData(role=msg.role, content=msg.content, id=msg.id)
             self._messages.append(message_data)
             message_widget = ChatMessage(msg.role, msg.content, message_id=msg.id)
             container.mount(message_widget)
@@ -351,7 +347,7 @@ class PersistentChatView(ChatView):
         if messages:
             messages.last().remove()
 
-    def get_conversation(self) -> "Conversation | None":
+    def get_conversation(self) -> Conversation | None:
         """Get the current conversation with all messages from database."""
         if self._conversation_id is None:
             return None

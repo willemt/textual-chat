@@ -10,8 +10,7 @@ from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
-
-from textual_golden import Golden, BLUE
+from textual_golden import BLUE, Golden
 
 
 @dataclass
@@ -22,9 +21,7 @@ class ToolUse:
     args: dict[str, Any]
 
     def __str__(self) -> str:
-        args_str = ", ".join(
-            f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0])
-        )
+        args_str = ", ".join(f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0]))
         return f"{self.name}({args_str})"
 
 
