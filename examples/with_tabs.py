@@ -63,7 +63,9 @@ class TabbedApp(App):
                             yield Input(id="username", placeholder="Enter username")
                         with Horizontal(classes="form-row"):
                             yield Label("API Key:")
-                            yield Input(id="api-key", placeholder="Enter API key", password=True)
+                            yield Input(
+                                id="api-key", placeholder="Enter API key", password=True
+                            )
                         with Horizontal(classes="form-row"):
                             yield Button("Save", id="save-btn", variant="primary")
                             yield Button("Reset", id="reset-btn")
