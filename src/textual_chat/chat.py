@@ -76,8 +76,8 @@ ToolResult = llm_adapter_litellm.ToolResult
 Role = Literal["user", "assistant", "system", "tool"]
 
 # Show thinking modes
-INLINE = "inline"  # Show animated thinking inside assistant block
-SEPARATE = "separate"  # Show thinking in separate block before response
+INLINE: Literal["inline"] = "inline"  # Show animated thinking inside assistant block
+SEPARATE: Literal["separate"] = "separate"  # Show thinking in separate block before response
 ShowThinkingMode = Literal["inline", "separate"]
 
 

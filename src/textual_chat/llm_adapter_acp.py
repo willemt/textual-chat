@@ -27,6 +27,7 @@ from acp.schema import (
     AgentMessageChunk,
     AgentPlanUpdate,
     AgentThoughtChunk,
+    AllowedOutcome,
     AvailableCommandsUpdate,
     CreateTerminalResponse,
     CurrentModeUpdate,
@@ -197,7 +198,11 @@ class ACPClientHandler(Client):
         self, options: Any, session_id: str, tool_call: Any, **kwargs: Any
     ) -> RequestPermissionResponse:
         """Handle permission requests - auto-approve for now."""
-        return RequestPermissionResponse(outcome={"outcome": "approved"})
+        # Auto-approve by selecting the first option if available
+        option_id = options[0].id if options and len(options) > 0 else "approved"
+        return RequestPermissionResponse(
+            outcome=AllowedOutcome(option_id=option_id, outcome="selected")
+        )
 
     # File system methods - raise not found for now
     async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any) -> Any:
