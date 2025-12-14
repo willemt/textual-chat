@@ -79,12 +79,10 @@ class SharedAgentConnection:
             # Increase buffer limit to handle large messages (e.g., session history)
             # Default is 64KB, we increase to 10MB to handle large session restores
             if self._proc.stdout:
-                self._proc.stdout._limit = 10 * 1024 * 1024  # 10MB
+                setattr(self._proc.stdout, "_limit", 10 * 1024 * 1024)
 
             # Connect to agent
-            self._conn = connect_to_agent(
-                self._client, self._proc.stdin, self._proc.stdout
-            )
+            self._conn = connect_to_agent(self._client, self._proc.stdin, self._proc.stdout)
 
             # Initialize
             self.init_response = await self._conn.initialize(
@@ -169,9 +167,7 @@ class AgentManager:
         Returns:
             Shared connection instance
         """
-        log.info(
-            f"📞 get_connection called on AgentManager instance: {hex(self._instance_id)}"
-        )
+        log.info(f"📞 get_connection called on AgentManager instance: {hex(self._instance_id)}")
         if agent_command not in self._connections:
             log.info(f"Creating new shared connection for: {agent_command}")
             log.info(f"   Existing connections: {list(self._connections.keys())}")

@@ -61,13 +61,18 @@ def _extract_cache_details(usage: Any) -> CacheDetails:
     return details
 
 
+def _empty_cache_details() -> CacheDetails:
+    """Factory for empty CacheDetails."""
+    return {}
+
+
 @dataclass
 class Usage:
     """Token usage information."""
 
     input: int = 0
     output: int = 0
-    details: CacheDetails = field(default_factory=dict)
+    details: CacheDetails = field(default_factory=_empty_cache_details)
 
 
 @dataclass
@@ -156,6 +161,8 @@ def _detect_model() -> tuple[str | None, str | None]:
         return "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"
     if os.getenv("OPENAI_API_KEY"):
         return "gpt-4o-mini", "OPENAI_API_KEY"
+    if os.getenv("GITHUB_TOKEN") or os.getenv("GITHUB_API_KEY"):
+        return "github/gpt-4o-mini", "GITHUB_TOKEN"
     if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
         return "gemini/gemini-1.5-flash", "GEMINI_API_KEY"
     if os.getenv("GROQ_API_KEY"):
@@ -188,9 +195,7 @@ def get_async_model(
     if model_id is None:
         detected, source = _detect_model()
         if detected is None:
-            raise ValueError(
-                "No model configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, etc."
-            )
+            raise ValueError("No model configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
         model_id = detected
         log.info(f"Auto-detected model: {model_id} from {source}")
     return AsyncModel(model_id, api_key=api_key, api_base=api_base)
@@ -384,18 +389,14 @@ class AsyncChainResponse:
                         for tc in delta.tool_calls:
                             idx = tc.index
                             while len(tool_calls_data) <= idx:
-                                tool_calls_data.append(
-                                    {"id": "", "name": "", "arguments": ""}
-                                )
+                                tool_calls_data.append({"id": "", "name": "", "arguments": ""})
                             if tc.id:
                                 tool_calls_data[idx]["id"] = tc.id
                             if tc.function:
                                 if tc.function.name:
                                     tool_calls_data[idx]["name"] = tc.function.name
                                 if tc.function.arguments:
-                                    tool_calls_data[idx][
-                                        "arguments"
-                                    ] += tc.function.arguments
+                                    tool_calls_data[idx]["arguments"] += tc.function.arguments
 
             # Store usage from last chunk
             if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
@@ -462,9 +463,7 @@ class AsyncChainResponse:
             tool_call = ToolCall(
                 id=tc_data["id"],
                 name=tc_data["name"],
-                arguments=(
-                    json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
-                ),
+                arguments=(json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}),
             )
             tool_calls.append(tool_call)
 
@@ -500,9 +499,7 @@ class AsyncChainResponse:
             results[tc.id] = ToolResult(tool_call_id=tc.id, output=output)
 
         # Execute async tools in parallel
-        async def run_async_tool(
-            tc: ToolCall, func: Callable
-        ) -> tuple[str, ToolResult]:
+        async def run_async_tool(tc: ToolCall, func: Callable) -> tuple[str, ToolResult]:
             try:
                 output = str(await func(**tc.arguments))
             except Exception as e:
@@ -518,9 +515,7 @@ class AsyncChainResponse:
 
         # Handle unknown tools
         for tc in unknown_calls:
-            results[tc.id] = ToolResult(
-                tool_call_id=tc.id, output=f"Unknown tool: {tc.name}"
-            )
+            results[tc.id] = ToolResult(tool_call_id=tc.id, output=f"Unknown tool: {tc.name}")
 
         # Yield results in original order, firing after callbacks
         for tc in tool_calls:

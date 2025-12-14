@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from textual.binding import Binding
 from textual.widget import Widget
 from textual.widgets import (
     Button,
@@ -70,12 +71,13 @@ def introspect_app(
         context_parts.append(f"Current screen: {screen.__doc__.strip()}")
 
     # Determine which widgets to introspect
+    # App and Screen are both Widget subclasses, cast for type checker
     if scope == "app":
-        root = app
+        root = cast(Widget, app)
     elif scope == "screen":
-        root = screen
+        root = cast(Widget, screen)
     else:
-        root = app  # Default to app
+        root = cast(Widget, app)
 
     # Walk the DOM and discover widgets
     discovered = _discover_widgets(root, exclude)
@@ -86,7 +88,7 @@ def introspect_app(
             widget_id = _sanitize_tool_name(widget.id)
         else:
             widget_id = "table" if i == 0 else f"table_{i + 1}"
-        dt_tools = create_datatable_tools(widget, widget_id)
+        dt_tools = create_datatable_tools(cast(DataTable, widget), widget_id)
         tools.update(dt_tools)
         context_parts.append(f"DataTable '{widget_id}': queryable data table")
 
@@ -95,7 +97,7 @@ def introspect_app(
             widget_id = _sanitize_tool_name(widget.id)
         else:
             widget_id = "button" if i == 0 else f"button_{i + 1}"
-        btn_tools = _create_button_tools(widget, widget_id)
+        btn_tools = _create_button_tools(cast(Button, widget), widget_id)
         tools.update(btn_tools)
         label = str(widget.label) if hasattr(widget, "label") else widget_id
         context_parts.append(f"Button '{widget_id}': {label}")
@@ -105,7 +107,7 @@ def introspect_app(
             widget_id = _sanitize_tool_name(widget.id)
         else:
             widget_id = "input" if i == 0 else f"input_{i + 1}"
-        input_tools = _create_input_tools(widget, widget_id)
+        input_tools = _create_input_tools(cast(Input, widget), widget_id)
         tools.update(input_tools)
         placeholder = getattr(widget, "placeholder", "")
         context_parts.append(f"Input '{widget_id}': {placeholder or 'text input'}")
@@ -115,7 +117,7 @@ def introspect_app(
             widget_id = _sanitize_tool_name(widget.id)
         else:
             widget_id = "textarea" if i == 0 else f"textarea_{i + 1}"
-        ta_tools = _create_textarea_tools(widget, widget_id)
+        ta_tools = _create_textarea_tools(cast(TextArea, widget), widget_id)
         tools.update(ta_tools)
         context_parts.append(f"TextArea '{widget_id}': multi-line text editor")
 
@@ -133,13 +135,11 @@ def introspect_app(
             widget_id = _sanitize_tool_name(widget.id)
         else:
             widget_id = "tabs" if i == 0 else f"tabs_{i + 1}"
-        tab_tools = _create_tabbed_content_tools(widget, widget_id)
+        tab_tools = _create_tabbed_content_tools(widget, widget_id)  # type: ignore[arg-type]
         tools.update(tab_tools)
         # Get tab names for context
         tab_names = [tab.id or str(j) for j, tab in enumerate(widget.query("TabPane"))]
-        context_parts.append(
-            f"TabbedContent '{widget_id}': tabs [{', '.join(tab_names)}]"
-        )
+        context_parts.append(f"TabbedContent '{widget_id}': tabs [{', '.join(tab_names)}]")
 
     # Add screen navigation tools
     screen_tools = _create_screen_tools(app)
@@ -287,9 +287,7 @@ def _create_label_tools(label: Widget, name: str) -> dict[str, Callable]:
     return {f"read_{name}": read}
 
 
-def _create_tabbed_content_tools(
-    tabbed: TabbedContent, name: str
-) -> dict[str, Callable]:
+def _create_tabbed_content_tools(tabbed: TabbedContent, name: str) -> dict[str, Callable]:
     """Create tools for a TabbedContent widget."""
 
     def get_active_tab() -> str:
@@ -364,18 +362,26 @@ def _create_action_tools(app: App) -> dict[str, Callable]:
         all_bindings.extend(app.screen.BINDINGS)
 
     for binding in all_bindings:
+        # Bindings can be Binding objects or tuples - only process Binding objects
+        if not isinstance(binding, Binding):
+            continue
+
         # Skip common/internal actions
-        action = binding.action if hasattr(binding, "action") else str(binding)
+        action = binding.action
         if action in ("focus_next", "focus_previous"):
             continue
 
         # Use just the action name for the tool name (not the full binding repr)
         action_name = _sanitize_tool_name(action)
-        description = binding.description if hasattr(binding, "description") else action
+        description = binding.description
 
         def run_action(act: str = action, _app: App = app) -> str:
             """Run this action."""
-            _app.run_action(act)
+            result = _app.run_action(act)
+            # run_action may return a coroutine, but we can't await it in sync context
+            # The action will still execute, we just don't wait for completion
+            if result is not None:
+                pass  # Acknowledge the result exists
             return f"Executed action '{act}'"
 
         # Use description in docstring

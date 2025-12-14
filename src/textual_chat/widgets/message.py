@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
@@ -21,9 +21,7 @@ class ToolUse:
     args: dict[str, Any]
 
     def __str__(self) -> str:
-        args_str = ", ".join(
-            f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0])
-        )
+        args_str = ", ".join(f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0]))
         return f"{self.name}({args_str})"
 
 
@@ -119,10 +117,8 @@ class MessageWidget(Widget):
         self.border_title = title or role.title()
         self._tool_widgets: dict[str, ToolUseWidget] = {}  # tool_call_id -> widget
         self._current_markdown: Markdown | None = None
-        self._stream: Markdown.Stream | None = None
-        self._after_tooluse: bool = (
-            False  # Track if next markdown should have margin-top
-        )
+        self._stream: Any = None  # Markdown.Stream type not in public API
+        self._after_tooluse: bool = False  # Track if next markdown should have margin-top
 
     def compose(self) -> ComposeResult:
         with Vertical(id="message-content"):
@@ -138,7 +134,7 @@ class MessageWidget(Widget):
     def _scroll_parent(self) -> None:
         """Scroll parent container to show this message."""
         try:
-            if self.parent:
+            if isinstance(self.parent, ScrollableContainer):
                 self.parent.scroll_end(animate=False)
         except Exception:
             pass
@@ -172,8 +168,8 @@ class MessageWidget(Widget):
         self._current_markdown = md
         self.call_after_refresh(self._scroll_parent)
 
-    def get_markdown_stream(self) -> Markdown.Stream:
-        """Get a streaming interface for efficient markdown updates."""
+    def get_markdown_stream(self) -> Any:
+        """Get a streaming interface for efficient markdown updates (returns Markdown.Stream)."""
         container = self._get_content_container()
         loading = self._get_loading_indicator()
 
@@ -191,8 +187,8 @@ class MessageWidget(Widget):
         self.call_after_refresh(self._scroll_parent)
         return self._stream
 
-    def ensure_stream(self) -> Markdown.Stream:
-        """Get current stream, or create a new one if needed (e.g., after tool use)."""
+    def ensure_stream(self) -> Any:
+        """Get current stream, or create a new one if needed (returns Markdown.Stream)."""
         if self._stream is None:
             return self.get_markdown_stream()
         return self._stream

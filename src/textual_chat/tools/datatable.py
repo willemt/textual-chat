@@ -7,12 +7,11 @@ from collections.abc import Callable
 from typing import Any
 
 from rich.text import Text
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 
 
-def create_datatable_tools(
-    table: DataTable, name: str = "table"
-) -> dict[str, Callable]:
+def create_datatable_tools(table: DataTable, name: str = "table") -> dict[str, Callable]:
     """Create tool functions for accessing a DataTable.
 
     Args:
@@ -124,7 +123,7 @@ def create_datatable_tools(
         if row_index < 0 or row_index >= len(row_keys):
             return f"Row index {row_index} out of range (0-{len(row_keys) - 1})"
         col_index = columns.index(column)
-        table.cursor_coordinate = (row_index, col_index)
+        table.cursor_coordinate = Coordinate(row_index, col_index)
         table.focus()
         return f"Cursor moved to ({row_index}, {column})"
 

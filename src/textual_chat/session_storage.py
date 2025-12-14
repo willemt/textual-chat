@@ -45,13 +45,29 @@ class SessionStorage:
     def _init_db(self) -> None:
         """Initialize the database schema."""
         with sqlite3.connect(self.db_path) as conn:
+            # Check if old schema exists and drop it (schema migration)
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+            )
+            if cursor.fetchone():
+                # Check if table has old schema (missing agent_command)
+                cursor = conn.execute("PRAGMA table_info(sessions)")
+                columns = [col[1] for col in cursor.fetchall()]
+                if "agent_command" not in columns:
+                    log.info("Migrating sessions table to new schema (adding agent_command)")
+                    conn.execute("DROP TABLE sessions")
+
             # Working directory-based sessions (new API)
+            # Each session is scoped to both working_dir AND agent_command
+            # so OpenCode sessions don't get mixed with Claude Code sessions
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
-                    working_dir TEXT PRIMARY KEY,
+                    working_dir TEXT NOT NULL,
+                    agent_command TEXT NOT NULL,
                     session_id TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (working_dir, agent_command)
                 )
             """
             )
@@ -69,13 +85,14 @@ class SessionStorage:
             conn.commit()
         log.info(f"Session database initialized at: {self.db_path}")
 
-    # ========== New API (working directory-based) ==========
+    # ========== New API (working directory + agent command based) ==========
 
-    def get_session_id(self, cwd: str | None) -> str | None:
-        """Get existing session ID for a working directory.
+    def get_session_id(self, cwd: str | None, agent_command: str | None = None) -> str | None:
+        """Get existing session ID for a working directory and agent.
 
         Args:
             cwd: Working directory path
+            agent_command: Agent command (e.g., "claude-code-acp", "opencode acp")
 
         Returns:
             Session ID if one exists, None otherwise
@@ -84,32 +101,44 @@ class SessionStorage:
             log.warning("❌ get_session_id: cwd is None")
             return None
 
+        if not agent_command:
+            log.warning("❌ get_session_id: agent_command is None")
+            return None
+
         # Normalize path
         normalized = str(Path(cwd).resolve())
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                "SELECT session_id FROM sessions WHERE working_dir = ?", (normalized,)
+                "SELECT session_id FROM sessions WHERE working_dir = ? AND agent_command = ?",
+                (normalized, agent_command),
             )
             row = cursor.fetchone()
 
         if row:
             session_id: str = row[0]
-            log.warning(f"✅ Found existing session {session_id} for {normalized}")
+            log.warning(
+                f"✅ Found existing session {session_id} for {normalized} + {agent_command}"
+            )
             return session_id
         else:
-            log.warning(f"❌ No existing session for {normalized}")
+            log.warning(f"❌ No existing session for {normalized} + {agent_command}")
             return None
 
-    def store_session_id(self, cwd: str | None, session_id: str) -> None:
-        """Store a session ID for a working directory.
+    def store_session_id(self, cwd: str | None, agent_command: str | None, session_id: str) -> None:
+        """Store a session ID for a working directory and agent.
 
         Args:
             cwd: Working directory path
+            agent_command: Agent command (e.g., "claude-code-acp", "opencode acp")
             session_id: ACP session ID to store
         """
         if not cwd:
             log.warning(f"❌ store_session_id: cwd is None, cannot store {session_id}")
+            return
+
+        if not agent_command:
+            log.warning(f"❌ store_session_id: agent_command is None, cannot store {session_id}")
             return
 
         # Normalize path
@@ -118,17 +147,17 @@ class SessionStorage:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
-                INSERT INTO sessions (working_dir, session_id, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(working_dir) DO UPDATE SET
+                INSERT INTO sessions (working_dir, agent_command, session_id, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(working_dir, agent_command) DO UPDATE SET
                     session_id = excluded.session_id,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (normalized, session_id),
+                (normalized, agent_command, session_id),
             )
             conn.commit()
 
-        log.warning(f"💾 Stored session {session_id} for {normalized}")
+        log.warning(f"💾 Stored session {session_id} for {normalized} + {agent_command}")
 
     # ========== Legacy API (agent_command-based, for chat.py) ==========
 

@@ -43,6 +43,7 @@ if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
     _llm_handler.setFormatter(logging.Formatter("%(asctime)s\n%(message)s\n"))
     llm_log.addHandler(_llm_handler)
 
+import types
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -127,9 +128,7 @@ class ModelSelectModal(ModalScreen[str | None]):
         Binding("escape", "cancel", "Cancel"),
     ]
 
-    def __init__(
-        self, models: list[tuple[str, str, str]], current: str | None = None
-    ) -> None:
+    def __init__(self, models: list[tuple[str, str, str]], current: str | None = None) -> None:
         """Initialize modal.
 
         Args:
@@ -139,9 +138,7 @@ class ModelSelectModal(ModalScreen[str | None]):
         super().__init__()
         self.models = models
         self.current = current
-        self._model_info: dict[str, str] = {
-            mid: provider for _, mid, provider in models
-        }
+        self._model_info: dict[str, str] = {mid: provider for _, mid, provider in models}
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -154,9 +151,7 @@ class ModelSelectModal(ModalScreen[str | None]):
             yield Static("", id="model-info")
             yield Static("[i]Enter to select, Escape to cancel[/i]", id="hint")
 
-    def on_option_list_option_highlighted(
-        self, event: OptionList.OptionHighlighted
-    ) -> None:
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         """Update info when option is highlighted."""
         model_id = event.option.id
         if model_id and model_id in self._model_info:
@@ -426,6 +421,7 @@ class Chat(Widget):
         super().__init__(name=name, id=id, classes=classes)
 
         # Select adapter
+        self._adapter: types.ModuleType
         if adapter == "litellm":
             self._adapter = llm_adapter_litellm
         elif adapter == "acp":
@@ -434,7 +430,7 @@ class Chat(Widget):
             self._adapter = llm_adapter_acp
         else:
             # Assume it's a module
-            self._adapter = adapter
+            self._adapter = adapter  # type: ignore[assignment]
 
         # Model configuration
         self._model_id = model  # Will use adapter's auto-detect if None
@@ -461,17 +457,13 @@ class Chat(Widget):
         # Session management (for ACP adapter)
         self._session_storage: SessionStorage | None = None
         self._pending_session_prompt = False
-        self._message_history: list[dict[str, str]] = (
-            []
-        )  # Track messages for session persistence
+        self._message_history: list[dict[str, str]] = []  # Track messages for session persistence
 
         # Tool state
         self._tools: dict[str, Callable] = {}  # Local tools
         self._mcp_servers: list[Any] = []
         self._mcp_clients: list[Any] = []
-        self._mcp_tools: dict[str, tuple[Any, str]] = (
-            {}
-        )  # MCP tool_name -> (client, tool_name)
+        self._mcp_tools: dict[str, tuple[Any, str]] = {}  # MCP tool_name -> (client, tool_name)
 
         # Response state
         self._is_responding = False
@@ -509,8 +501,10 @@ class Chat(Widget):
         """
         if self.assistant_name:
             return self.assistant_name
-        if hasattr(self._conversation, "agent_name") and self._conversation.agent_name:
-            return self._conversation.agent_name
+        if self._conversation and hasattr(self._conversation, "agent_name"):
+            agent_name = getattr(self._conversation, "agent_name", None)
+            if agent_name:
+                return str(agent_name)
         return None
 
     def _register_tool(self, func: Callable, name: str | None = None) -> None:
@@ -554,8 +548,9 @@ class Chat(Widget):
                 api_key=self.api_key,
                 api_base=self.api_base,
             )
-            self._conversation = self._model.conversation()
-            self._update_model_status()
+            if self._model:
+                self._conversation = self._model.conversation()
+                self._update_model_status()
         except ValueError as e:
             self._config_error = str(e)
             self._show_error(self._config_error)
@@ -565,9 +560,7 @@ class Chat(Widget):
             self._session_storage = SessionStorage()
             # Check for previous session
             if self._model and self._session_storage:
-                prev_session_data = self._session_storage.get_session(
-                    self._model.model_id
-                )
+                prev_session_data = self._session_storage.get_session(self._model.model_id)
                 if prev_session_data:
                     self._pending_session_prompt = True
                     self._show_session_prompt_in_input()
@@ -613,6 +606,16 @@ class Chat(Widget):
                     ("GPT-4 Turbo", "gpt-4-turbo", "OpenAI"),
                     ("o1", "o1", "OpenAI"),
                     ("o1-mini", "o1-mini", "OpenAI"),
+                ]
+            )
+
+        # GitHub Models
+        if os.getenv("GITHUB_TOKEN") or os.getenv("GITHUB_API_KEY"):
+            models.extend(
+                [
+                    ("GPT-4o (GitHub)", "github/gpt-4o", "GitHub Models"),
+                    ("GPT-4o Mini (GitHub)", "github/gpt-4o-mini", "GitHub Models"),
+                    ("Claude Sonnet 3.5 (GitHub)", "github/claude-3.5-sonnet", "GitHub Models"),
                 ]
             )
 
@@ -673,9 +676,10 @@ class Chat(Widget):
                 api_key=self.api_key,
                 api_base=self.api_base,
             )
-            self._conversation = self._model.conversation()
-            self._update_model_status()
-            self.post_message(self.ModelChanged(model_id))
+            if self._model:
+                self._conversation = self._model.conversation()
+                self._update_model_status()
+                self.post_message(self.ModelChanged(model_id))
         except Exception as e:
             self._set_status(f"Failed: {e}")
 
@@ -707,9 +711,7 @@ class Chat(Widget):
         except Exception as e:
             log.debug(f"Introspection failed: {e}")
 
-    def _make_mcp_wrapper(
-        self, client: Any, name: str, description: str | None
-    ) -> Callable:
+    def _make_mcp_wrapper(self, client: Any, name: str, description: str | None) -> Callable:
         """Create an MCP tool wrapper function with proper closure capture."""
 
         async def wrapper(**kwargs) -> str:
@@ -743,9 +745,7 @@ class Chat(Widget):
                 tools = await client.list_tools()
                 for tool in tools:
                     # Create wrapper with proper closure capture
-                    wrapper = self._make_mcp_wrapper(
-                        client, tool.name, tool.description
-                    )
+                    wrapper = self._make_mcp_wrapper(client, tool.name, tool.description)
                     self._tools[tool.name] = wrapper
                     self._mcp_tools[tool.name] = (client, tool.name)
 
@@ -826,7 +826,7 @@ class Chat(Widget):
                 # Restore session ID to try loading it
                 session_id = prev_session_data.get("session_id")
                 log.warning(f"Found session ID in storage: {session_id}")
-                if session_id and hasattr(self._conversation, "_session_id"):
+                if session_id and self._conversation and hasattr(self._conversation, "_session_id"):
                     self._conversation._session_id = session_id
                     log.warning(f"✅ Set conversation._session_id to: {session_id}")
 
@@ -836,7 +836,8 @@ class Chat(Widget):
                         # Force the conversation to connect and load the session NOW
                         dummy_chain = self._conversation.chain("", system=self.system)
                         # Start the iteration to trigger connection
-                        await dummy_chain._ensure_connection()
+                        if hasattr(dummy_chain, "_ensure_connection"):
+                            await dummy_chain._ensure_connection()
                         log.warning("✅ Session load triggered successfully")
                     except Exception as e:
                         log.warning(f"❌ Failed to trigger session load: {e}")
@@ -899,12 +900,16 @@ class Chat(Widget):
         # Show responding indicator with animation
         # Use assistant name (from override or ACP agent)
         agent_title = self._get_assistant_title()
-        assistant_widget = self._add_message(
-            "assistant", loading=True, title=agent_title
-        )
+        assistant_widget = self._add_message("assistant", loading=True, title=agent_title)
         self._set_status("Responding...")
 
         try:
+            # Guard against uninitialized conversation
+            if not self._conversation:
+                self._show_error("Conversation not initialized")
+                assistant_widget.mark_complete()
+                return
+
             # Get tools list for adapter
             tools = list(self._tools.values()) if self._tools else None
 
@@ -967,9 +972,7 @@ class Chat(Widget):
                     f"Input: {last_usage.input}, Output: {last_usage.output}, Cached: {cached}"
                 )
                 if self.show_token_usage:
-                    assistant_widget.set_token_usage(
-                        last_usage.input, last_usage.output, cached
-                    )
+                    assistant_widget.set_token_usage(last_usage.input, last_usage.output, cached)
 
             llm_log.debug(f"=== LLM Response ===\n{full_text}")
             self._set_status("")
@@ -982,6 +985,7 @@ class Chat(Widget):
             if (
                 self._session_storage
                 and self._model
+                and self._conversation
                 and hasattr(self._conversation, "_session_id")
             ):
                 session_id = self._conversation._session_id
