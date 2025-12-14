@@ -191,7 +191,7 @@ class _ChatInput(TextArea):
         """Set placeholder after mount."""
         self.placeholder = self._placeholder
 
-    async def _on_key(self, event) -> None:
+    async def _on_key(self, event: Any) -> None:
         """Handle key presses."""
         # Shift+Enter (comes through as ctrl+j) - insert newline
         if event.key == "ctrl+j":
@@ -714,7 +714,7 @@ class Chat(Widget):
     def _make_mcp_wrapper(self, client: Any, name: str, description: str | None) -> Callable:
         """Create an MCP tool wrapper function with proper closure capture."""
 
-        async def wrapper(**kwargs) -> str:
+        async def wrapper(**kwargs: Any) -> str:
             result = await client.call_tool(name, kwargs)
             if hasattr(result, "content"):
                 if isinstance(result.content, list):

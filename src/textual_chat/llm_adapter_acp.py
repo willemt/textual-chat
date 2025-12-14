@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
@@ -28,7 +28,9 @@ from acp.schema import (
     AgentPlanUpdate,
     AgentThoughtChunk,
     AvailableCommandsUpdate,
+    CreateTerminalResponse,
     CurrentModeUpdate,
+    RequestPermissionResponse,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
@@ -91,7 +93,7 @@ def get_async_model(
 class AsyncModel:
     """Async model interface for ACP agents."""
 
-    def __init__(self, agent_command: str):
+    def __init__(self, agent_command: str) -> None:
         self.model_id = agent_command
         self.agent_command = agent_command
         self.is_claude = False  # ACP agents handle their own caching
@@ -111,7 +113,7 @@ class AsyncModel:
 class ACPClientHandler(Client):
     """Handles ACP client callbacks for session updates."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._text_chunks: asyncio.Queue[str | None] = asyncio.Queue()
         self._tool_calls: dict[str, ToolCall] = {}
         self._before_call: Callable[[ToolCall], Any] | None = None
@@ -193,12 +195,12 @@ class ACPClientHandler(Client):
 
     async def request_permission(
         self, options: Any, session_id: str, tool_call: Any, **kwargs: Any
-    ):
+    ) -> RequestPermissionResponse:
         """Handle permission requests - auto-approve for now."""
-        return {"outcome": {"outcome": "approved"}}
+        return RequestPermissionResponse(outcome={"outcome": "approved"})
 
     # File system methods - raise not found for now
-    async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any):
+    async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any) -> Any:
         from acp import RequestError
 
         raise RequestError.method_not_found("fs/write_text_file")
@@ -210,36 +212,59 @@ class ACPClientHandler(Client):
         limit: int | None = None,
         line: int | None = None,
         **kwargs: Any,
-    ):
+    ) -> Any:
         from acp import RequestError
 
         raise RequestError.method_not_found("fs/read_text_file")
 
     # Terminal methods - raise not found for now
-    async def create_terminal(self, command: str, session_id: str, **kwargs: Any):
+    async def create_terminal(
+        self,
+        command: str,
+        session_id: str,
+        args: list[str] | None = None,
+        cwd: str | None = None,
+        env: list[Any] | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: Any,
+    ) -> CreateTerminalResponse:
         from acp import RequestError
 
         raise RequestError.method_not_found("terminal/create")
 
-    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any):
+    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
         from acp import RequestError
 
         raise RequestError.method_not_found("terminal/output")
 
-    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any):
+    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
         from acp import RequestError
 
         raise RequestError.method_not_found("terminal/release")
 
-    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any):
+    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
         from acp import RequestError
 
         raise RequestError.method_not_found("terminal/wait_for_exit")
 
-    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any):
+    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
         from acp import RequestError
 
         raise RequestError.method_not_found("terminal/kill")
+
+    def on_connect(self, conn: Any) -> None:
+        """Called when the connection is established."""
+        pass
+
+    async def ext_method(self, method: str, params: Any) -> Any:
+        """Handle extension methods."""
+        from acp import RequestError
+
+        raise RequestError.method_not_found(method)
+
+    async def ext_notification(self, method: str, params: Any) -> None:
+        """Handle extension notifications."""
+        return None
 
     def signal_done(self) -> None:
         """Signal that streaming is complete."""
@@ -249,7 +274,7 @@ class ACPClientHandler(Client):
 class AsyncConversation:
     """Manages conversation with an ACP agent."""
 
-    def __init__(self, model: AsyncModel, cwd: str | None = None):
+    def __init__(self, model: AsyncModel, cwd: str | None = None) -> None:
         self.model = model
         self._conn: Any = None  # Shared connection (managed by AgentManager)
         self._client: ACPClientHandler | None = None  # Shared client handler
@@ -345,7 +370,7 @@ class AsyncChainResponse:
         system: str | None,
         before_call: Callable | None,
         after_call: Callable | None,
-    ):
+    ) -> None:
         self._conversation = conversation
         self._prompt = prompt
         self._system = system
@@ -476,7 +501,7 @@ class AsyncChainResponse:
         assert conv._client is not None
         return conv._conn, conv._session_id, conv._client
 
-    async def __aiter__(self):
+    async def __aiter__(self) -> AsyncIterator[str]:
         """Iterate over text chunks from the agent."""
         self._iterated = True
 
@@ -492,7 +517,7 @@ class AsyncChainResponse:
         chunks_collected: list[str] = []
         prompt_error: Exception | None = None
 
-        async def run_prompt():
+        async def run_prompt() -> None:
             """Run the prompt and signal completion."""
             nonlocal prompt_error
             log.debug("ACP run_prompt: starting")
@@ -507,7 +532,7 @@ class AsyncChainResponse:
                 await client._text_chunks.put(None)
                 log.debug("ACP run_prompt: signaled done")
 
-        async def collect_chunks():
+        async def collect_chunks() -> None:
             """Collect chunks from the queue."""
             log.debug("ACP collect_chunks: starting")
             while True:
@@ -535,7 +560,7 @@ class AsyncChainResponse:
         self._current_response._text = full_text
         log.debug(f"ACP __aiter__: done, text={repr(full_text)[:50]}")
 
-    async def responses(self):
+    async def responses(self) -> AsyncIterator[AsyncResponse]:
         """Iterate over response objects (for usage info)."""
         if not self._iterated:
             async for _ in self:
@@ -547,7 +572,7 @@ class AsyncChainResponse:
 class AsyncResponse:
     """Response object with text and usage information."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._text: str = ""
         self._usage: Usage | None = None
 

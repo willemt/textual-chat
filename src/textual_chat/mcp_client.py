@@ -9,6 +9,7 @@ from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from pydantic import AnyUrl
 
 
 @dataclass
@@ -46,9 +47,7 @@ class MCPClient:
 
     def __init__(self) -> None:
         self._sessions: dict[str, ClientSession] = {}
-        self._tools: dict[str, tuple[str, MCPTool]] = (
-            {}
-        )  # tool_name -> (server_name, tool)
+        self._tools: dict[str, tuple[str, MCPTool]] = {}  # tool_name -> (server_name, tool)
         self._cleanup_tasks: list[Any] = []
 
     @asynccontextmanager
@@ -147,11 +146,7 @@ class MCPClient:
             List of available resources
         """
         resources = []
-        sessions = (
-            {server_name: self._sessions[server_name]}
-            if server_name
-            else self._sessions
-        )
+        sessions = {server_name: self._sessions[server_name]} if server_name else self._sessions
 
         for session in sessions.values():
             try:
@@ -183,11 +178,11 @@ class MCPClient:
         # Try each session until we find one that can handle this URI
         for session in self._sessions.values():
             try:
-                result = await session.read_resource(uri)
+                result = await session.read_resource(AnyUrl(uri))
                 if result.contents:
                     content = result.contents[0]
                     if hasattr(content, "text"):
-                        return content.text
+                        return str(content.text)
                     return str(content)
             except Exception:
                 continue

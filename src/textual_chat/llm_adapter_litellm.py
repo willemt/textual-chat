@@ -351,7 +351,7 @@ class AsyncChainResponse:
 
         return kwargs
 
-    async def __aiter__(self):
+    async def __aiter__(self) -> AsyncGenerator[str, None]:
         """Iterate over text chunks, automatically handling tool calls."""
         self._iterated = True
 
@@ -528,7 +528,7 @@ class AsyncChainResponse:
 
             yield tc, tool_result
 
-    async def responses(self):
+    async def responses(self) -> AsyncGenerator[AsyncResponse, None]:
         """Iterate over response objects (for usage info)."""
         if not self._iterated:
             # Consume the iterator first
@@ -541,7 +541,7 @@ class AsyncChainResponse:
 class AsyncResponse:
     """Response object with text and usage information."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._text: str = ""
         self._usage: Usage | None = None
 

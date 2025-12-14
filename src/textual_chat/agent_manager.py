@@ -152,7 +152,7 @@ class SharedAgentConnection:
 class AgentManager:
     """Manages shared agent connections per command."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Map agent_command -> SharedAgentConnection
         self._connections: dict[str, SharedAgentConnection] = {}
         self._instance_id = id(self)
