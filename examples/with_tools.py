@@ -2,7 +2,9 @@
 
 import random
 from datetime import datetime
+
 from textual.app import App, ComposeResult
+
 from textual_chat import Chat
 
 

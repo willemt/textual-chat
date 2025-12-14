@@ -55,7 +55,9 @@ class SessionPromptInput(Widget):
     def compose(self) -> ComposeResult:
         with Horizontal():
             yield Label("Previous session found, use?", id="prompt-text")
-            yield Button("Yes", variant="success", id="btn-yes", flat=True, compact=True)
+            yield Button(
+                "Yes", variant="success", id="btn-yes", flat=True, compact=True
+            )
             yield Button("No", variant="error", id="btn-no", flat=True, compact=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

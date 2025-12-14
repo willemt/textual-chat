@@ -3,7 +3,7 @@
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Footer, Static
+from textual.widgets import Footer, Header, Static
 
 from textual_chat import Chat
 

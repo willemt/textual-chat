@@ -10,7 +10,7 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Static
 
-from textual_chat import Chat, INLINE, SEPARATE
+from textual_chat import SEPARATE, Chat
 
 
 class ChatModal(ModalScreen):

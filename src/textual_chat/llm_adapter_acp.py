@@ -162,7 +162,9 @@ class ACPClientHandler(Client):
                 tc = ToolCall(
                     id=tool_call_id,
                     name=update.title or "",
-                    arguments=(update.raw_input if isinstance(update.raw_input, dict) else {}),
+                    arguments=(
+                        update.raw_input if isinstance(update.raw_input, dict) else {}
+                    ),
                 )
                 self._tool_calls[tool_call_id] = tc
 
@@ -190,7 +192,9 @@ class ACPClientHandler(Client):
         return {"outcome": {"outcome": "approved"}}
 
     # File system methods - raise not found for now
-    async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any):
+    async def write_text_file(
+        self, content: str, path: str, session_id: str, **kwargs: Any
+    ):
         from acp import RequestError
 
         raise RequestError.method_not_found("fs/write_text_file")
@@ -223,7 +227,9 @@ class ACPClientHandler(Client):
 
         raise RequestError.method_not_found("terminal/release")
 
-    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any):
+    async def wait_for_terminal_exit(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ):
         from acp import RequestError
 
         raise RequestError.method_not_found("terminal/wait_for_exit")
@@ -247,7 +253,9 @@ class AsyncConversation:
         self._client: ACPClientHandler | None = None  # Shared client handler
         self.agent_name: str | None = None  # Agent name from initialization
         self._cwd: str = cwd or os.getcwd()  # Working directory for agent sessions
-        self.init_response: Any = None  # Store initialization response with capabilities
+        self.init_response: Any = (
+            None  # Store initialization response with capabilities
+        )
         self._session_loaded: bool = False  # Whether session has been loaded/forked
 
         # Check if we have an existing session for this working directory
@@ -259,7 +267,9 @@ class AsyncConversation:
                 f"🔍 AsyncConversation.__init__: Found existing session {self._session_id} for {self._cwd}"
             )
         else:
-            log.warning(f"🔍 AsyncConversation.__init__: No existing session for {self._cwd}")
+            log.warning(
+                f"🔍 AsyncConversation.__init__: No existing session for {self._cwd}"
+            )
 
         # If we loaded a session ID, don't mark it as loaded yet
         # This will trigger the fork/restore logic in _ensure_connection
@@ -415,7 +425,9 @@ class AsyncChainResponse:
                     new_session_id = result.sessionId
 
                 if new_session_id and new_session_id != conv._session_id:
-                    log.info(f"   Forked session ID: {conv._session_id} → {new_session_id}")
+                    log.info(
+                        f"   Forked session ID: {conv._session_id} → {new_session_id}"
+                    )
                     conv._session_id = new_session_id
 
                 # Update session storage with (possibly new) forked session ID
@@ -440,7 +452,9 @@ class AsyncChainResponse:
 
                     # Try 3: Create new session (fallback after restore failed)
                     log.warning("🔄 Attempt 3: Creating new session...")
-                    session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
+                    session = await conv._conn.new_session(
+                        cwd=conv._cwd, mcp_servers=[]
+                    )
                     conv._session_id = session.session_id
                     # Don't set _session_loaded = True here, since we failed to restore
                     # and created a new session instead
@@ -485,7 +499,9 @@ class AsyncChainResponse:
             nonlocal prompt_error
             log.debug("ACP run_prompt: starting")
             try:
-                await conn.prompt(session_id=session_id, prompt=[text_block(self._prompt)])
+                await conn.prompt(
+                    session_id=session_id, prompt=[text_block(self._prompt)]
+                )
                 log.debug("ACP run_prompt: prompt completed")
             except Exception as e:
                 log.debug(f"ACP run_prompt: error {e}")

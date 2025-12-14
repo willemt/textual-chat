@@ -1,6 +1,7 @@
 """The simplest possible chat app. 6 lines of code."""
 
 from textual.app import App, ComposeResult
+
 from textual_chat import Chat
 
 

@@ -133,7 +133,10 @@ class SessionStorage:
     # ========== Legacy API (agent_command-based, for chat.py) ==========
 
     def save_session(
-        self, agent_command: str, session_id: str, messages: list[dict[str, str]] | None = None
+        self,
+        agent_command: str,
+        session_id: str,
+        messages: list[dict[str, str]] | None = None,
     ) -> None:
         """Save a session ID and messages for a specific agent (legacy API).
 

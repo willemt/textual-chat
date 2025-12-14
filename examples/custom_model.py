@@ -1,8 +1,8 @@
 """Customize the model, system prompt, and behavior."""
 
 from textual.app import App, ComposeResult
-from textual_chat import Chat
 
+from textual_chat import Chat
 
 chat = Chat(
     model="claude-sonnet-4-20250514",  # Or "gpt-4o", "ollama/llama3", etc.

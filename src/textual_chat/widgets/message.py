@@ -21,7 +21,9 @@ class ToolUse:
     args: dict[str, Any]
 
     def __str__(self) -> str:
-        args_str = ", ".join(f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0]))
+        args_str = ", ".join(
+            f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0])
+        )
         return f"{self.name}({args_str})"
 
 
@@ -104,7 +106,11 @@ class MessageWidget(Widget):
     """
 
     def __init__(
-        self, role: str, content: str = "", loading: bool = False, title: str | None = None
+        self,
+        role: str,
+        content: str = "",
+        loading: bool = False,
+        title: str | None = None,
     ) -> None:
         super().__init__(classes=f"message {role}")
         self.role = role
@@ -114,7 +120,9 @@ class MessageWidget(Widget):
         self._tool_widgets: dict[str, ToolUseWidget] = {}  # tool_call_id -> widget
         self._current_markdown: Markdown | None = None
         self._stream: Markdown.Stream | None = None
-        self._after_tooluse: bool = False  # Track if next markdown should have margin-top
+        self._after_tooluse: bool = (
+            False  # Track if next markdown should have margin-top
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="message-content"):

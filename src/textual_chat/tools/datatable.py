@@ -10,7 +10,9 @@ from rich.text import Text
 from textual.widgets import DataTable
 
 
-def create_datatable_tools(table: DataTable, name: str = "table") -> dict[str, Callable]:
+def create_datatable_tools(
+    table: DataTable, name: str = "table"
+) -> dict[str, Callable]:
     """Create tool functions for accessing a DataTable.
 
     Args:

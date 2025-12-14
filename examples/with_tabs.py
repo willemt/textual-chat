@@ -1,8 +1,8 @@
 """Example app with tabbed interface and Chat overlay."""
 
 from textual.app import App, ComposeResult
-from textual.widgets import TabbedContent, TabPane, DataTable, Label, Button, Input
-from textual.containers import Vertical, Horizontal
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Button, DataTable, Input, Label, TabbedContent, TabPane
 
 from textual_chat import Chat
 
@@ -74,23 +74,27 @@ class TabbedApp(App):
         # Populate sales table
         sales = self.query_one("#sales", DataTable)
         sales.add_columns("Product", "Q1", "Q2", "Q3", "Q4", "Total")
-        sales.add_rows([
-            ("Widgets", 150, 200, 180, 220, 750),
-            ("Gadgets", 80, 95, 110, 130, 415),
-            ("Gizmos", 200, 180, 190, 210, 780),
-            ("Doodads", 50, 60, 55, 70, 235),
-        ])
+        sales.add_rows(
+            [
+                ("Widgets", 150, 200, 180, 220, 750),
+                ("Gadgets", 80, 95, 110, 130, 415),
+                ("Gizmos", 200, 180, 190, 210, 780),
+                ("Doodads", 50, 60, 55, 70, 235),
+            ]
+        )
 
         # Populate inventory table
         inventory = self.query_one("#inventory", DataTable)
         inventory.add_columns("Item", "SKU", "In Stock", "Reorder Point", "Status")
-        inventory.add_rows([
-            ("Widgets", "WGT-001", 500, 100, "OK"),
-            ("Gadgets", "GDG-002", 80, 150, "Low"),
-            ("Gizmos", "GZM-003", 300, 50, "OK"),
-            ("Doodads", "DOD-004", 45, 75, "Critical"),
-            ("Thingamajigs", "THG-005", 200, 100, "OK"),
-        ])
+        inventory.add_rows(
+            [
+                ("Widgets", "WGT-001", 500, 100, "OK"),
+                ("Gadgets", "GDG-002", 80, 150, "Low"),
+                ("Gizmos", "GZM-003", 300, 50, "OK"),
+                ("Doodads", "DOD-004", 45, 75, "Critical"),
+                ("Thingamajigs", "THG-005", 200, 100, "OK"),
+            ]
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-btn":

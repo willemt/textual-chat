@@ -2,8 +2,8 @@
 
 from textual.app import App, ComposeResult
 from textual.widgets import Footer
-from textual_chat import Chat
 
+from textual_chat import Chat
 
 # Enable extended thinking - the model will show its reasoning
 chat = Chat(

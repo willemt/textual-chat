@@ -11,7 +11,15 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input, Label, Static, TabbedContent, TextArea
+from textual.widgets import (
+    Button,
+    DataTable,
+    Input,
+    Label,
+    Static,
+    TabbedContent,
+    TextArea,
+)
 
 from .datatable import create_datatable_tools
 
@@ -129,7 +137,9 @@ def introspect_app(
         tools.update(tab_tools)
         # Get tab names for context
         tab_names = [tab.id or str(j) for j, tab in enumerate(widget.query("TabPane"))]
-        context_parts.append(f"TabbedContent '{widget_id}': tabs [{', '.join(tab_names)}]")
+        context_parts.append(
+            f"TabbedContent '{widget_id}': tabs [{', '.join(tab_names)}]"
+        )
 
     # Add screen navigation tools
     screen_tools = _create_screen_tools(app)
@@ -277,7 +287,9 @@ def _create_label_tools(label: Widget, name: str) -> dict[str, Callable]:
     return {f"read_{name}": read}
 
 
-def _create_tabbed_content_tools(tabbed: TabbedContent, name: str) -> dict[str, Callable]:
+def _create_tabbed_content_tools(
+    tabbed: TabbedContent, name: str
+) -> dict[str, Callable]:
     """Create tools for a TabbedContent widget."""
 
     def get_active_tab() -> str:

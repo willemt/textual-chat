@@ -3,10 +3,9 @@
 This example shows how to use FastMCP servers with the Chat widget.
 """
 
+from mcp.server import FastMCP
 from textual.app import App, ComposeResult
 from textual.widgets import Footer
-
-from mcp.server import FastMCP
 
 from textual_chat import Chat
 

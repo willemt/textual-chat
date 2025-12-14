@@ -188,7 +188,9 @@ def get_async_model(
     if model_id is None:
         detected, source = _detect_model()
         if detected is None:
-            raise ValueError("No model configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
+            raise ValueError(
+                "No model configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, etc."
+            )
         model_id = detected
         log.info(f"Auto-detected model: {model_id} from {source}")
     return AsyncModel(model_id, api_key=api_key, api_base=api_base)
@@ -382,14 +384,18 @@ class AsyncChainResponse:
                         for tc in delta.tool_calls:
                             idx = tc.index
                             while len(tool_calls_data) <= idx:
-                                tool_calls_data.append({"id": "", "name": "", "arguments": ""})
+                                tool_calls_data.append(
+                                    {"id": "", "name": "", "arguments": ""}
+                                )
                             if tc.id:
                                 tool_calls_data[idx]["id"] = tc.id
                             if tc.function:
                                 if tc.function.name:
                                     tool_calls_data[idx]["name"] = tc.function.name
                                 if tc.function.arguments:
-                                    tool_calls_data[idx]["arguments"] += tc.function.arguments
+                                    tool_calls_data[idx][
+                                        "arguments"
+                                    ] += tc.function.arguments
 
             # Store usage from last chunk
             if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
@@ -456,7 +462,9 @@ class AsyncChainResponse:
             tool_call = ToolCall(
                 id=tc_data["id"],
                 name=tc_data["name"],
-                arguments=json.loads(tc_data["arguments"]) if tc_data["arguments"] else {},
+                arguments=(
+                    json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
+                ),
             )
             tool_calls.append(tool_call)
 
@@ -492,7 +500,9 @@ class AsyncChainResponse:
             results[tc.id] = ToolResult(tool_call_id=tc.id, output=output)
 
         # Execute async tools in parallel
-        async def run_async_tool(tc: ToolCall, func: Callable) -> tuple[str, ToolResult]:
+        async def run_async_tool(
+            tc: ToolCall, func: Callable
+        ) -> tuple[str, ToolResult]:
             try:
                 output = str(await func(**tc.arguments))
             except Exception as e:
@@ -508,7 +518,9 @@ class AsyncChainResponse:
 
         # Handle unknown tools
         for tc in unknown_calls:
-            results[tc.id] = ToolResult(tool_call_id=tc.id, output=f"Unknown tool: {tc.name}")
+            results[tc.id] = ToolResult(
+                tool_call_id=tc.id, output=f"Unknown tool: {tc.name}"
+            )
 
         # Yield results in original order, firing after callbacks
         for tc in tool_calls:
