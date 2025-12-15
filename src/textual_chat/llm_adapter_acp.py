@@ -392,6 +392,26 @@ class AsyncConversation:
         self._session_id = None
 
 
+async def create_connection(conv: AsyncConversation) -> None:
+    # Get shared connection from agent manager
+    agent_manager = get_agent_manager()
+
+    shared_conn = agent_manager.get_connection(conv.model.agent_command)
+
+    # Ensure the shared connection is initialized
+    conv._conn = await shared_conn.ensure_connected()
+
+    # Use the shared client handler
+    conv._client = shared_conn._client
+
+    # Copy agent info from shared connection
+    conv.init_response = shared_conn.init_response
+    conv.agent_name = shared_conn.agent_name
+
+    log.warning(f"Using shared connection for: {conv.model.agent_command}")
+    log.warning(f"Agent name: {conv.agent_name}")
+
+
 class AsyncChainResponse:
     """Async iterator that yields text chunks from ACP agent."""
 
@@ -412,6 +432,82 @@ class AsyncChainResponse:
         self._current_response: AsyncResponse | None = None
         self._iterated = False
 
+    async def _create_new_session(self, conv: AsyncConversation) -> None:
+        log.warning("========== CREATING NEW SESSION ==========")
+        session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
+        conv._session_id = session.session_id
+        conv._session_loaded = True  # Mark as loaded so we don't try to restore it
+        log.warning(f"Created new session ID: {conv._session_id}")
+        log.warning(f"Session CWD: {conv._cwd}")
+
+        # Store in session storage for reuse
+        storage = get_session_storage()
+        if conv._session_id:
+            storage.store_session_id(conv._cwd, conv.model.agent_command, conv._session_id)
+
+    async def _load_session(self, conv: AsyncConversation) -> None:
+        log.warning("🔄 Attempt: Trying session/load...")
+        try:
+            session = await conv._conn.load_session(
+                cwd=conv._cwd, mcp_servers=[], session_id=conv._session_id
+            )
+            conv._session_loaded = True
+            log.warning("✅ SUCCESS with session/load!")
+            log.warning(f"Load response: {session}")
+            # Session ID stays the same after load
+        except Exception as e2:
+            log.warning(f"❌ session/load failed: {type(e2).__name__}: {e2}")
+            raise
+
+    async def _new_session(self, conv: AsyncConversation) -> None:
+        log.warning("🔄 Attempt: Creating new session...")
+        session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
+        conv._session_id = session.session_id
+        # Don't set _session_loaded = True here, since we failed to restore
+        # and created a new session instead
+        log.warning(f"Created new session ID: {conv._session_id}")
+        log.warning(f"Session CWD: {conv._cwd}")
+
+        # Update session storage with new session ID
+        storage = get_session_storage()
+        if conv._session_id:
+            storage.store_session_id(conv._cwd, conv.model.agent_command, conv._session_id)
+
+    async def _fork_session(self, conv: AsyncConversation) -> None:
+        log.warning("🔄: Trying session/fork via send_request...")
+        try:
+            result = await conv._conn._conn.send_request(
+                "session/fork",
+                {
+                    "sessionId": conv._session_id,
+                    "cwd": conv._cwd,
+                    "mcpServers": [],
+                },
+            )
+            conv._session_loaded = True
+            log.info("✅ Session forked successfully")
+
+            # Extract new session ID from fork response (could be dict or object)
+            new_session_id = None
+            if isinstance(result, dict):
+                new_session_id = result.get("sessionId") or result.get("session_id")
+            elif hasattr(result, "session_id"):
+                new_session_id = result.session_id
+            elif hasattr(result, "sessionId"):
+                new_session_id = result.sessionId
+
+            if new_session_id and new_session_id != conv._session_id:
+                log.info(f"   Forked session ID: {conv._session_id} → {new_session_id}")
+                conv._session_id = new_session_id
+
+            # Update session storage with (possibly new) forked session ID
+            storage = get_session_storage()
+            if conv._session_id:
+                storage.store_session_id(conv._cwd, conv.model.agent_command, conv._session_id)
+        except Exception as e:
+            log.warning(f"❌ session/fork failed: {type(e).__name__}: {e}")
+            raise
+
     async def _ensure_connection(self) -> tuple[Any, str, ACPClientHandler]:
         """Ensure we have a connection and session."""
         conv = self._conversation
@@ -421,105 +517,24 @@ class AsyncChainResponse:
         log.warning(f"Has _session_loaded attr: {hasattr(conv, '_session_loaded')}")
 
         if conv._conn is None:
-            # Get shared connection from agent manager
-            agent_manager = get_agent_manager()
-            shared_conn = agent_manager.get_connection(conv.model.agent_command)
+            await create_connection(conv)
 
-            # Ensure the shared connection is initialized
-            conv._conn = await shared_conn.ensure_connected()
-
-            # Use the shared client handler
-            conv._client = shared_conn._client
-
-            # Copy agent info from shared connection
-            conv.init_response = shared_conn.init_response
-            conv.agent_name = shared_conn.agent_name
-
-            log.warning(f"Using shared connection for: {conv.model.agent_command}")
-            log.warning(f"Agent name: {conv.agent_name}")
+        # We have a session ID (from storage) but haven't loaded it yet
+        # Try fork first (undocumented but implemented), then load, then new
+        log.warning("========== ATTEMPTING TO RESTORE EXISTING SESSION ==========")
+        log.warning(f"Trying to restore session ID: {conv._session_id}")
+        log.warning(f"CWD: {conv._cwd}")
 
         if conv._session_id is None:
-            # Create new session
-            log.warning("========== CREATING NEW SESSION ==========")
-            session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
-            conv._session_id = session.session_id
-            conv._session_loaded = True  # Mark as loaded so we don't try to restore it
-            log.warning(f"Created new session ID: {conv._session_id}")
-            log.warning(f"Session CWD: {conv._cwd}")
-
-            # Store in session storage for reuse
-            storage = get_session_storage()
-            if conv._session_id:
-                storage.store_session_id(conv._cwd, conv.model.agent_command, conv._session_id)
+            await self._create_new_session(conv)
         elif conv._session_id and not conv._session_loaded:
-            # We have a session ID (from storage) but haven't loaded it yet
-            # Try fork first (undocumented but implemented), then load, then new
-            log.warning("========== ATTEMPTING TO RESTORE EXISTING SESSION ==========")
-            log.warning(f"Trying to restore session ID: {conv._session_id}")
-            log.warning(f"CWD: {conv._cwd}")
-
-            # Try 1: session/fork (undocumented but exists in agent code)
-            log.warning("🔄 Attempt 1: Trying session/fork via send_request...")
             try:
-                result = await conv._conn._conn.send_request(
-                    "session/fork",
-                    {
-                        "sessionId": conv._session_id,
-                        "cwd": conv._cwd,
-                        "mcpServers": [],
-                    },
-                )
-                conv._session_loaded = True
-                log.info("✅ Session forked successfully")
-
-                # Extract new session ID from fork response (could be dict or object)
-                new_session_id = None
-                if isinstance(result, dict):
-                    new_session_id = result.get("sessionId") or result.get("session_id")
-                elif hasattr(result, "session_id"):
-                    new_session_id = result.session_id
-                elif hasattr(result, "sessionId"):
-                    new_session_id = result.sessionId
-
-                if new_session_id and new_session_id != conv._session_id:
-                    log.info(f"   Forked session ID: {conv._session_id} → {new_session_id}")
-                    conv._session_id = new_session_id
-
-                # Update session storage with (possibly new) forked session ID
-                storage = get_session_storage()
-                if conv._session_id:
-                    storage.store_session_id(conv._cwd, conv.model.agent_command, conv._session_id)
-            except Exception as e:
-                log.warning(f"❌ session/fork failed: {type(e).__name__}: {e}")
-
-                # Try 2: session/load
-                log.warning("🔄 Attempt 2: Trying session/load...")
+                await self._load_session(conv)
+            except:
                 try:
-                    session = await conv._conn.load_session(
-                        cwd=conv._cwd, mcp_servers=[], session_id=conv._session_id
-                    )
-                    conv._session_loaded = True
-                    log.warning("✅ SUCCESS with session/load!")
-                    log.warning(f"Load response: {session}")
-                    # Session ID stays the same after load
-                except Exception as e2:
-                    log.warning(f"❌ session/load failed: {type(e2).__name__}: {e2}")
-
-                    # Try 3: Create new session (fallback after restore failed)
-                    log.warning("🔄 Attempt 3: Creating new session...")
-                    session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
-                    conv._session_id = session.session_id
-                    # Don't set _session_loaded = True here, since we failed to restore
-                    # and created a new session instead
-                    log.warning(f"Created new session ID: {conv._session_id}")
-                    log.warning(f"Session CWD: {conv._cwd}")
-
-                    # Update session storage with new session ID
-                    storage = get_session_storage()
-                    if conv._session_id:
-                        storage.store_session_id(
-                            conv._cwd, conv.model.agent_command, conv._session_id
-                        )
+                    await self._fork_session(conv)
+                except:
+                    await self._new_session(conv)
 
         # Reset client for this turn
         if conv._client:

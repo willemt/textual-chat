@@ -963,9 +963,10 @@ class Chat(Widget):
             async for chunk in chain:
                 if self._cancel_requested:
                     break
+
                 # Get stream (creates new one after tool use)
-                stream = assistant_widget.ensure_stream()
-                await stream.write(chunk)
+                await assistant_widget.ensure_stream().write(chunk)
+
                 full_text += chunk
 
             # Close the stream and mark message complete
