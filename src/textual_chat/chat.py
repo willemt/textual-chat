@@ -195,10 +195,22 @@ class AgentSelectModal(ModalScreen[str | None]):
         height: 1;
         margin-top: 1;
     }
+    AgentSelectModal #custom-label {
+        text-align: left;
+        color: $text;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    AgentSelectModal #custom-agent-input {
+        width: 100%;
+        height: 3;
+        margin-top: 0;
+        margin-bottom: 1;
+    }
     AgentSelectModal #hint {
         text-align: center;
         color: $text-muted;
-        padding-top: 1;
+        padding-top: 0;
     }
     """
 
@@ -219,6 +231,8 @@ class AgentSelectModal(ModalScreen[str | None]):
         self._agent_info: dict[str, str] = {cmd: desc for _, cmd, desc in agents}
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import Input
+
         with Vertical():
             yield Static("Select Agent", id="title")
             options = [
@@ -227,7 +241,15 @@ class AgentSelectModal(ModalScreen[str | None]):
             ]
             yield OptionList(*options)
             yield Static("", id="agent-info")
-            yield Static("[i]Enter to select, Escape to cancel[/i]", id="hint")
+            yield Static("Or enter a custom agent command:", id="custom-label")
+            yield Input(
+                placeholder="e.g., python /path/to/agent.py",
+                id="custom-agent-input",
+            )
+            yield Static(
+                "[i]Enter to select, Tab to switch focus, Escape to cancel[/i]",
+                id="hint",
+            )
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         """Update info when option is highlighted."""
@@ -237,7 +259,40 @@ class AgentSelectModal(ModalScreen[str | None]):
             self.query_one("#agent-info", Static).update(f"[i]{info}[/i]")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Handle selection from the option list."""
         self.dismiss(event.option.id)
+
+    def on_input_submitted(self, event: Any) -> None:
+        """Handle custom agent input submission."""
+        from textual.widgets import Input
+        import shutil
+
+        custom_input = self.query_one("#custom-agent-input", Input)
+        custom_agent = custom_input.value.strip()
+
+        if not custom_agent:
+            self.notify("Please enter an agent command", severity="warning")
+            return
+
+        # Basic validation - check if command looks valid
+        parts = custom_agent.split()
+        if not parts:
+            self.notify("Invalid agent command", severity="warning")
+            return
+
+        executable = parts[0]
+
+        # Check if executable exists
+        if not (os.path.isabs(executable) and os.path.exists(executable)) and not shutil.which(
+            executable
+        ):
+            self.notify(
+                f"Warning: '{executable}' not found. Proceeding anyway...",
+                severity="warning",
+                timeout=5,
+            )
+
+        self.dismiss(custom_agent)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -412,8 +467,6 @@ class Chat(Widget):
 
     BINDINGS = [
         Binding("ctrl+l", "clear", "Clear", show=True),
-        Binding("ctrl+m", "select_model", "Models", show=False),
-        Binding("ctrl+a", "select_agent", "Agents", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -628,6 +681,14 @@ class Chat(Widget):
             self._show_agent_selector()
             return
 
+        # Validate ACP agent command if specified
+        if self._model_id and self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+            is_valid, error_msg = self._validate_agent_command(self._model_id)
+            if not is_valid:
+                self._config_error = error_msg
+                self._show_error(f"Invalid agent: {error_msg}")
+                return
+
         # Initialize the adapter model
         try:
             self._model = self._adapter.get_async_model(
@@ -672,11 +733,11 @@ class Chat(Widget):
 
         # For ACP adapter, show agent selector hint
         if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
-            self._set_status(f"Using {model_id}. Ctrl+A for agents")
+            self._set_status(f"Using {model_id}. Type /agent to switch, /help for commands")
         elif self.show_model_selector:
-            self._set_status(f"Using {model_id}. Ctrl+M for models")
+            self._set_status(f"Using {model_id}. Type /model to switch, /help for commands")
         else:
-            self._set_status(f"Using {model_id}")
+            self._set_status(f"Using {model_id}. Type /help for commands")
 
     def _get_available_models(self) -> list[tuple[str, str, str]]:
         """Get list of available models as (display_name, model_id, provider) tuples."""
@@ -770,10 +831,58 @@ class Chat(Widget):
             self._on_agent_selected,
         )
 
+    def _validate_agent_command(self, agent_command: str) -> tuple[bool, str]:
+        """Validate that an agent command exists.
+
+        Returns:
+            (is_valid, error_message) tuple
+        """
+        import shutil
+
+        # Split command into parts
+        parts = agent_command.split()
+        if not parts:
+            return False, "Agent command is empty"
+
+        executable = parts[0]
+
+        # Check if it's an absolute path
+        if os.path.isabs(executable):
+            if os.path.exists(executable) and os.access(executable, os.X_OK):
+                return True, ""
+            else:
+                return False, f"Executable not found or not accessible: {executable}"
+
+        # Check if it's in PATH
+        if shutil.which(executable):
+            return True, ""
+
+        # Not found
+        return (
+            False,
+            f"Command '{executable}' not found in PATH. Please provide full path or install the agent.",
+        )
+
     def _on_agent_selected(self, agent_command: str | None) -> None:
         """Handle agent selection from modal."""
         if not agent_command:
             return
+
+        # Skip if selecting the same agent
+        if self._model and agent_command == self._model.model_id:
+            return
+
+        # Validate agent command exists
+        is_valid, error_msg = self._validate_agent_command(agent_command)
+        if not is_valid:
+            self.notify(error_msg, severity="error", timeout=10)
+            self._set_status(f"Invalid agent: {error_msg}")
+            return
+
+        # Clear current chat UI and history
+        container = self.query_one("#chat-messages", ScrollableContainer)
+        container.remove_children()
+        self._message_history.clear()
 
         # Set the model ID to the selected agent
         self._model_id = agent_command
@@ -1055,6 +1164,11 @@ class Chat(Widget):
             )
             return
 
+        # Handle slash commands
+        if content.startswith("/"):
+            await self._handle_slash_command(content)
+            return
+
         await self._send(content)
 
     async def _send(self, content: str) -> None:
@@ -1176,6 +1290,49 @@ class Chat(Widget):
             log.exception(f"Error in _send: {e}")
         finally:
             self._is_responding = False
+
+    async def _handle_slash_command(self, command: str) -> None:
+        """Handle slash commands like /model and /agent."""
+        cmd = command.strip().lower()
+
+        if cmd == "/model":
+            # Show model selector (litellm adapter only)
+            if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+                self.notify(
+                    "Model selection not available for ACP adapter. Use /agent instead.",
+                    severity="warning",
+                )
+                return
+            if not self.show_model_selector:
+                self.notify("Model selection is disabled.", severity="warning")
+                return
+            self.action_select_model()
+
+        elif cmd == "/agent":
+            # Show agent selector (ACP adapter only)
+            if self._adapter.__name__ != "textual_chat.llm_adapter_acp":
+                self.notify(
+                    "Agent selection only available for ACP adapter. Use /model instead.",
+                    severity="warning",
+                )
+                return
+            self.action_select_agent()
+
+        elif cmd == "/help":
+            # Show help message
+            help_lines = [
+                "**Available slash commands:**",
+                "",
+                "• `/model` - Select a different LLM model (litellm adapter)",
+                "• `/agent` - Select a different ACP agent (acp adapter)",
+                "• `/help` - Show this help message",
+            ]
+            self._add_message("system", "\n".join(help_lines))
+
+        else:
+            self.notify(
+                f"Unknown command: {cmd}. Type /help for available commands.", severity="warning"
+            )
 
     def action_clear(self) -> None:
         """Clear the chat and start a new conversation."""
