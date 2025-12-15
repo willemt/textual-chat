@@ -125,6 +125,33 @@ class SessionStorage:
             log.warning(f"❌ No existing session for {normalized} + {agent_command}")
             return None
 
+    def delete_session_id(self, cwd: str | None, agent_command: str | None) -> None:
+        """Delete stored session ID for a working directory and agent.
+
+        Args:
+            cwd: Working directory path
+            agent_command: Agent command (e.g., "claude-code-acp", "opencode acp")
+        """
+        if not cwd or not agent_command:
+            log.warning(f"❌ delete_session_id: missing cwd={cwd} or agent_command={agent_command}")
+            return
+
+        # Normalize path
+        normalized = str(Path(cwd).resolve())
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM sessions WHERE working_dir = ? AND agent_command = ? RETURNING session_id",
+                (normalized, agent_command),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+
+        if row:
+            log.warning(f"🗑️  Deleted session {row[0]} for {normalized} + {agent_command}")
+        else:
+            log.warning(f"⚠️  No session found to delete for {normalized} + {agent_command}")
+
     def store_session_id(self, cwd: str | None, agent_command: str | None, session_id: str) -> None:
         """Store a session ID for a working directory and agent.
 

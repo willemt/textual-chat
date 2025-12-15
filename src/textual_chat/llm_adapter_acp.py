@@ -174,10 +174,33 @@ class ACPClientHandler(Client):
 
             # Create or get tool call
             if tool_call_id not in self._tool_calls:
+                # Extract arguments from raw_input
+                arguments: dict[str, Any] = {}
+                if isinstance(update.raw_input, dict):
+                    arguments = update.raw_input
+                elif isinstance(update.raw_input, str):
+                    # Try to parse JSON string
+                    import json
+
+                    try:
+                        parsed = json.loads(update.raw_input)
+                        if isinstance(parsed, dict):
+                            arguments = parsed
+                    except (json.JSONDecodeError, ValueError):
+                        # Not JSON, just note it as raw string
+                        arguments = {"input": update.raw_input}
+                elif update.raw_input is not None:
+                    # Some other type - just note it
+                    arguments = {"value": str(update.raw_input)}
+
+                log.debug(
+                    f"Tool {update.title}: raw_input type={type(update.raw_input)}, parsed args={arguments}"
+                )
+
                 tc = ToolCall(
                     id=tool_call_id,
                     name=update.title or "",
-                    arguments=(update.raw_input if isinstance(update.raw_input, dict) else {}),
+                    arguments=arguments,
                 )
                 self._tool_calls[tool_call_id] = tc
 

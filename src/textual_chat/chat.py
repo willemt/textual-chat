@@ -552,6 +552,7 @@ class Chat(Widget):
             cwd: Working directory for ACP adapter (optional).
             **llm_kwargs: Extra args passed to LiteLLM
         """
+
         super().__init__(name=name, id=id, classes=classes)
 
         # Select adapter
@@ -707,15 +708,7 @@ class Chat(Widget):
             self._config_error = str(e)
             self._show_error(self._config_error)
 
-        # Initialize session storage for ACP adapter
-        if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
-            self._session_storage = SessionStorage()
-            # Check for previous session
-            if self._model and self._session_storage:
-                prev_session_data = self._session_storage.get_session(self._model.model_id)
-                if prev_session_data:
-                    self._pending_session_prompt = True
-                    self._show_session_prompt_in_input()
+        self._check_existing_session()
 
         # Introspect app and register discovered tools
         if self.introspect:
@@ -724,6 +717,19 @@ class Chat(Widget):
         # Connect to MCP servers
         if self._mcp_servers:
             await self._connect_mcp_servers()
+
+    def _check_existing_session(self) -> None:
+        if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+            self._session_storage = SessionStorage()
+            # Check for previous session using working-directory based API
+            if self._model and self._session_storage:
+                session_id = self._session_storage.get_session_id(self.cwd, self._model.model_id)
+                if session_id:
+                    log.warning(f"🔔 Found existing session {session_id}, showing resume prompt")
+                    self._pending_session_prompt = True
+                    self._show_session_prompt_in_input()
+                else:
+                    log.warning(f"🆕 No existing session for {self.cwd} + {self._model.model_id}")
 
     def _update_model_status(self) -> None:
         """Update status to show current model."""
@@ -902,15 +908,7 @@ class Chat(Widget):
                     self._conversation = self._model.conversation()
                 self._update_model_status()
 
-                # Initialize session storage for ACP adapter
-                if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
-                    self._session_storage = SessionStorage()
-                    # Check for previous session
-                    if self._model and self._session_storage:
-                        prev_session_data = self._session_storage.get_session(self._model.model_id)
-                        if prev_session_data:
-                            self._pending_session_prompt = True
-                            self._show_session_prompt_in_input()
+                self._check_existing_session()
 
                 # Introspect app and register discovered tools
                 if self.introspect:
@@ -1078,6 +1076,82 @@ class Chat(Widget):
         container.scroll_end(animate=False)
         return widget
 
+    async def _resume_session(self) -> None:
+        # Resume the previous session
+        log.info("========== SESSION RESUME CLICKED ==========")
+
+        if not self._session_storage or not self._model:
+            return
+
+        # For ACP: use working-directory based API
+        if self._adapter.__name__ == "textual_chat.llm_adapter_acp" and self.cwd:
+            session_id = self._session_storage.get_session_id(self.cwd, self._model.model_id)
+            log.warning(f"Found session ID from working-dir API: {session_id}")
+
+            if session_id and self._conversation and hasattr(self._conversation, "_session_id"):
+                self._conversation._session_id = session_id
+                log.warning(f"✅ Set conversation._session_id to: {session_id}")
+
+                # IMMEDIATELY trigger session loading by ensuring connection
+                log.warning("🔄 Triggering immediate session load...")
+                try:
+                    if hasattr(self._conversation, "ensure_connected"):
+                        await self._conversation.ensure_connected()
+                    log.warning("✅ Session load triggered successfully")
+                except Exception as e:
+                    log.warning(f"❌ Failed to trigger session load: {e}")
+
+                self._set_status("Resumed previous session")
+            else:
+                log.warning(f"❌ Could not set session ID. session_id={session_id}")
+
+        # For LiteLLM: use legacy agent-based API
+        else:
+            prev_session_data = self._session_storage.get_session(self._model.model_id)
+            log.warning(f"Previous session data (legacy): {prev_session_data}")
+            if prev_session_data:
+                # Restore session ID
+                session_id = prev_session_data.get("session_id")
+                log.warning(f"Found session ID in storage: {session_id}")
+
+                # Restore message history to UI
+                messages = prev_session_data.get("messages", [])
+                for msg in messages:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    title = None
+                    if role == "assistant":
+                        title = self._get_assistant_title()
+                    self._add_message(role, content, title=title)
+                    self._message_history.append({"role": role, "content": content})
+
+                # Show confirmation
+                if messages:
+                    self._set_status(f"Resumed session with {len(messages)} messages")
+
+    def _init_session(self) -> None:
+        # Start fresh - clear the stored session
+        log.warning("========== SESSION START FRESH CLICKED ==========")
+
+        if not self._session_storage or not self._model:
+            return
+
+        # For ACP: clear working-directory based session
+        if self._adapter.__name__ == "textual_chat.llm_adapter_acp" and self.cwd:
+            self._session_storage.delete_session_id(self.cwd, self._model.model_id)
+        # For LiteLLM: clear agent-based session
+        else:
+            self._session_storage.clear_session(self._model.model_id)
+
+        # Clear the conversation's session ID so it creates a fresh session
+        if self._conversation and hasattr(self._conversation, "_session_id"):
+            log.warning("🆕 User chose NO - clearing session ID to start fresh")
+            self._conversation._session_id = None
+            if hasattr(self._conversation, "_session_loaded"):
+                self._conversation._session_loaded = False
+
+        self._set_status("Starting new session")
+
     async def on_session_prompt_input_session_choice(
         self, event: SessionPromptInput.SessionChoice
     ) -> None:
@@ -1098,53 +1172,9 @@ class Chat(Widget):
             return
 
         if event.resume:
-            # Resume the previous session
-            prev_session_data = self._session_storage.get_session(self._model.model_id)
-            log.warning("========== SESSION RESUME CLICKED ==========")
-            log.warning(f"Previous session data: {prev_session_data}")
-            if prev_session_data:
-                # Restore session ID to try loading it
-                session_id = prev_session_data.get("session_id")
-                log.warning(f"Found session ID in storage: {session_id}")
-                if session_id and self._conversation and hasattr(self._conversation, "_session_id"):
-                    self._conversation._session_id = session_id
-                    log.warning(f"✅ Set conversation._session_id to: {session_id}")
-
-                    # IMMEDIATELY trigger session loading by ensuring connection
-                    log.warning("🔄 Triggering immediate session load...")
-                    try:
-                        # Force the conversation to connect and load the session NOW
-                        # Use ensure_connected() instead of creating a dummy chain
-                        if hasattr(self._conversation, "ensure_connected"):
-                            await self._conversation.ensure_connected()
-                        log.warning("✅ Session load triggered successfully")
-                    except Exception as e:
-                        log.warning(f"❌ Failed to trigger session load: {e}")
-                else:
-                    log.warning(
-                        f"❌ Could not set session ID. session_id={session_id}, has_attr={hasattr(self._conversation, '_session_id')}"
-                    )
-
-                # Restore message history to UI
-                messages = prev_session_data.get("messages", [])
-                for msg in messages:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    # Use assistant name for assistant messages
-                    title = None
-                    if role == "assistant":
-                        title = self._get_assistant_title()
-                    self._add_message(role, content, title=title)
-                    # Add to history tracking
-                    self._message_history.append({"role": role, "content": content})
-
-                # Show confirmation
-                if messages:
-                    self._set_status(f"Resumed session with {len(messages)} messages")
+            await self._resume_session()
         else:
-            # Start fresh - clear the stored session
-            self._session_storage.clear_session(self._model.model_id)
-            self._set_status("Starting new session")
+            self._init_session()
 
     async def on__chat_input_submitted(self, event: _ChatInput.Submitted) -> None:
         """Handle message submission."""
@@ -1265,18 +1295,7 @@ class Chat(Widget):
             # Track assistant response in history
             self._message_history.append({"role": "assistant", "content": full_text})
 
-            # Save session ID and message history for ACP adapter
-            if (
-                self._session_storage
-                and self._model
-                and self._conversation
-                and hasattr(self._conversation, "_session_id")
-            ):
-                session_id = self._conversation._session_id
-                if session_id:
-                    self._session_storage.save_session(
-                        self._model.model_id, session_id, self._message_history
-                    )
+            self._save_session()
 
         except asyncio.CancelledError:
             assistant_widget.mark_complete()
@@ -1296,6 +1315,7 @@ class Chat(Widget):
         cmd = command.strip().lower()
 
         if cmd == "/model":
+            # FIXME: ACP does allow model selection
             # Show model selector (litellm adapter only)
             if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
                 self.notify(
@@ -1333,6 +1353,22 @@ class Chat(Widget):
             self.notify(
                 f"Unknown command: {cmd}. Type /help for available commands.", severity="warning"
             )
+
+    def _save_session(self) -> None:
+        """
+        Save session ID and message history for ACP adapter
+        """
+
+        if (
+            self._session_storage
+            and self._model
+            and self._conversation
+            and hasattr(self._conversation, "_session_id")
+        ):
+            if session_id := self._conversation._session_id:
+                self._session_storage.save_session(
+                    self._model.model_id, session_id, self._message_history
+                )
 
     def action_clear(self) -> None:
         """Clear the chat and start a new conversation."""

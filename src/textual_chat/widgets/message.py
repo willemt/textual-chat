@@ -21,7 +21,20 @@ class ToolUse:
     args: dict[str, Any]
 
     def __str__(self) -> str:
-        args_str = ", ".join(f"{k}={v!r}" for k, v in sorted(self.args.items(), key=lambda x: x[0]))
+        if not self.args:
+            # No arguments - just show tool name
+            return f"{self.name}()"
+
+        # Format arguments concisely
+        parts = []
+        for k, v in sorted(self.args.items(), key=lambda x: x[0]):
+            # Truncate long values
+            v_str = repr(v)
+            if len(v_str) > 60:
+                v_str = v_str[:57] + "..."
+            parts.append(f"{k}={v_str}")
+
+        args_str = ", ".join(parts)
         return f"{self.name}({args_str})"
 
 
