@@ -1,6 +1,8 @@
 """Widget components for textual-chat."""
 
+from .agent_select import AgentSelectModal
 from .message import MessageWidget, ToolUse
+from .model_select import ModelSelectModal
 from .session_prompt import SessionPromptInput
 
-__all__ = ["MessageWidget", "ToolUse", "SessionPromptInput"]
+__all__ = ["AgentSelectModal", "MessageWidget", "ModelSelectModal", "SessionPromptInput", "ToolUse"]

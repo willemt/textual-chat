@@ -61,7 +61,8 @@ from . import llm_adapter_litellm
 from .session_storage import SessionStorage
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
-from .widgets import MessageWidget, SessionPromptInput, ToolUse
+from .utils import get_available_agents, get_available_models
+from .widgets import AgentSelectModal, MessageWidget, ModelSelectModal, SessionPromptInput, ToolUse
 
 # Default adapter
 _default_adapter = llm_adapter_litellm
@@ -85,217 +86,6 @@ class ConfigurationError(Exception):
     """Raised when Chat is misconfigured."""
 
     pass
-
-
-class ModelSelectModal(ModalScreen[str | None]):
-    """Modal for selecting an LLM model."""
-
-    DEFAULT_CSS = """
-    ModelSelectModal {
-        align: center middle;
-    }
-    ModelSelectModal > Vertical {
-        width: 60;
-        height: auto;
-        max-height: 80%;
-        background: $surface;
-        border: round $primary;
-        padding: 1 2;
-    }
-    ModelSelectModal #title {
-        text-align: center;
-        text-style: bold;
-        padding-bottom: 1;
-    }
-    ModelSelectModal OptionList {
-        height: auto;
-        max-height: 20;
-    }
-    ModelSelectModal #model-info {
-        text-align: center;
-        color: $text-muted;
-        height: 1;
-        margin-top: 1;
-    }
-    ModelSelectModal #hint {
-        text-align: center;
-        color: $text-muted;
-        padding-top: 1;
-    }
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-    ]
-
-    def __init__(self, models: list[tuple[str, str, str]], current: str | None = None) -> None:
-        """Initialize modal.
-
-        Args:
-            models: List of (display_name, model_id, provider) tuples
-            current: Currently selected model_id
-        """
-        super().__init__()
-        self.models = models
-        self.current = current
-        self._model_info: dict[str, str] = {mid: provider for _, mid, provider in models}
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static("Select Model", id="title")
-            options = [
-                Option(f"{'● ' if mid == self.current else '  '}{name}", id=mid)
-                for name, mid, _ in self.models
-            ]
-            yield OptionList(*options)
-            yield Static("", id="model-info")
-            yield Static("[i]Enter to select, Escape to cancel[/i]", id="hint")
-
-    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        """Update info when option is highlighted."""
-        model_id = event.option.id
-        if model_id and model_id in self._model_info:
-            info = self._model_info[model_id]
-            self.query_one("#model-info", Static).update(f"[i]{info}[/i]")
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class AgentSelectModal(ModalScreen[str | None]):
-    """Modal for selecting an ACP agent."""
-
-    DEFAULT_CSS = """
-    AgentSelectModal {
-        align: center middle;
-    }
-    AgentSelectModal > Vertical {
-        width: 60;
-        height: auto;
-        max-height: 80%;
-        background: $surface;
-        border: round $primary;
-        padding: 1 2;
-    }
-    AgentSelectModal #title {
-        text-align: center;
-        text-style: bold;
-        padding-bottom: 1;
-    }
-    AgentSelectModal OptionList {
-        height: auto;
-        max-height: 20;
-    }
-    AgentSelectModal #agent-info {
-        text-align: center;
-        color: $text-muted;
-        height: 1;
-        margin-top: 1;
-    }
-    AgentSelectModal #custom-label {
-        text-align: left;
-        color: $text;
-        margin-top: 1;
-        margin-bottom: 0;
-    }
-    AgentSelectModal #custom-agent-input {
-        width: 100%;
-        height: 3;
-        margin-top: 0;
-        margin-bottom: 1;
-    }
-    AgentSelectModal #hint {
-        text-align: center;
-        color: $text-muted;
-        padding-top: 0;
-    }
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-    ]
-
-    def __init__(self, agents: list[tuple[str, str, str]], current: str | None = None) -> None:
-        """Initialize modal.
-
-        Args:
-            agents: List of (display_name, agent_command, description) tuples
-            current: Currently selected agent_command
-        """
-        super().__init__()
-        self.agents = agents
-        self.current = current
-        self._agent_info: dict[str, str] = {cmd: desc for _, cmd, desc in agents}
-
-    def compose(self) -> ComposeResult:
-        from textual.widgets import Input
-
-        with Vertical():
-            yield Static("Select Agent", id="title")
-            options = [
-                Option(f"{'● ' if cmd == self.current else '  '}{name}", id=cmd)
-                for name, cmd, _ in self.agents
-            ]
-            yield OptionList(*options)
-            yield Static("", id="agent-info")
-            yield Static("Or enter a custom agent command:", id="custom-label")
-            yield Input(
-                placeholder="e.g., python /path/to/agent.py",
-                id="custom-agent-input",
-            )
-            yield Static(
-                "[i]Enter to select, Tab to switch focus, Escape to cancel[/i]",
-                id="hint",
-            )
-
-    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        """Update info when option is highlighted."""
-        agent_cmd = event.option.id
-        if agent_cmd and agent_cmd in self._agent_info:
-            info = self._agent_info[agent_cmd]
-            self.query_one("#agent-info", Static).update(f"[i]{info}[/i]")
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        """Handle selection from the option list."""
-        self.dismiss(event.option.id)
-
-    def on_input_submitted(self, event: Any) -> None:
-        """Handle custom agent input submission."""
-        from textual.widgets import Input
-        import shutil
-
-        custom_input = self.query_one("#custom-agent-input", Input)
-        custom_agent = custom_input.value.strip()
-
-        if not custom_agent:
-            self.notify("Please enter an agent command", severity="warning")
-            return
-
-        # Basic validation - check if command looks valid
-        parts = custom_agent.split()
-        if not parts:
-            self.notify("Invalid agent command", severity="warning")
-            return
-
-        executable = parts[0]
-
-        # Check if executable exists
-        if not (os.path.isabs(executable) and os.path.exists(executable)) and not shutil.which(
-            executable
-        ):
-            self.notify(
-                f"Warning: '{executable}' not found. Proceeding anyway...",
-                severity="warning",
-                timeout=5,
-            )
-
-        self.dismiss(custom_agent)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
 
 
 class _ChatInput(TextArea):
@@ -745,92 +535,9 @@ class Chat(Widget):
         else:
             self._set_status(f"Using {model_id}. Type /help for commands")
 
-    def _get_available_models(self) -> list[tuple[str, str, str]]:
-        """Get list of available models as (display_name, model_id, provider) tuples."""
-        models = []
-
-        # Anthropic models
-        if os.getenv("ANTHROPIC_API_KEY"):
-            models.extend(
-                [
-                    ("Claude Sonnet 4", "claude-sonnet-4-20250514", "Anthropic"),
-                    ("Claude Opus 4", "claude-opus-4-20250514", "Anthropic"),
-                    ("Claude Haiku 3.5", "claude-3-5-haiku-latest", "Anthropic"),
-                ]
-            )
-
-        # OpenAI models
-        if os.getenv("OPENAI_API_KEY"):
-            models.extend(
-                [
-                    ("GPT-4o", "gpt-4o", "OpenAI"),
-                    ("GPT-4o Mini", "gpt-4o-mini", "OpenAI"),
-                    ("GPT-4 Turbo", "gpt-4-turbo", "OpenAI"),
-                    ("o1", "o1", "OpenAI"),
-                    ("o1-mini", "o1-mini", "OpenAI"),
-                ]
-            )
-
-        # GitHub Models
-        if os.getenv("GITHUB_TOKEN") or os.getenv("GITHUB_API_KEY"):
-            models.extend(
-                [
-                    ("GPT-4o (GitHub)", "github/gpt-4o", "GitHub Models"),
-                    ("GPT-4o Mini (GitHub)", "github/gpt-4o-mini", "GitHub Models"),
-                    ("Claude Sonnet 3.5 (GitHub)", "github/claude-3.5-sonnet", "GitHub Models"),
-                ]
-            )
-
-        # Google models
-        if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
-            models.extend(
-                [
-                    ("Gemini 1.5 Flash", "gemini/gemini-1.5-flash", "Google"),
-                    ("Gemini 1.5 Pro", "gemini/gemini-1.5-pro", "Google"),
-                    ("Gemini 2.0 Flash", "gemini/gemini-2.0-flash-exp", "Google"),
-                ]
-            )
-
-        # Groq models
-        if os.getenv("GROQ_API_KEY"):
-            models.extend(
-                [
-                    ("Llama 3.1 8B (Groq)", "groq/llama-3.1-8b-instant", "Groq"),
-                    ("Llama 3.1 70B (Groq)", "groq/llama-3.1-70b-versatile", "Groq"),
-                    ("Mixtral 8x7B (Groq)", "groq/mixtral-8x7b-32768", "Groq"),
-                ]
-            )
-
-        # DeepSeek models
-        if os.getenv("DEEPSEEK_API_KEY"):
-            models.extend(
-                [
-                    ("DeepSeek Chat", "deepseek/deepseek-chat", "DeepSeek"),
-                    ("DeepSeek Coder", "deepseek/deepseek-coder", "DeepSeek"),
-                ]
-            )
-
-        return models
-
-    def _get_available_agents(self) -> list[tuple[str, str, str]]:
-        """Get list of available ACP agents as (display_name, agent_command, description) tuples."""
-        agents = [
-            (
-                "Claude Code",
-                "claude-code-acp",
-                "Anthropic's official CLI agent with web search, bash, and file tools",
-            ),
-            (
-                "OpenCode",
-                "opencode acp",
-                "Open-source alternative agent with similar capabilities",
-            ),
-        ]
-        return agents
-
     def _show_agent_selector(self) -> None:
         """Show agent selection modal."""
-        agents = self._get_available_agents()
+        agents = get_available_agents()
         current = self._model.model_id if self._model else None
         self.app.push_screen(
             AgentSelectModal(agents, current),
@@ -928,7 +635,7 @@ class Chat(Widget):
         """Show model selection modal."""
         if not self.show_model_selector:
             return
-        models = self._get_available_models()
+        models = get_available_models()
         if not models:
             self.notify("No models available. Set API keys.", severity="warning")
             return
