@@ -393,6 +393,7 @@ class Chat(Widget):
         introspect: bool = True,
         introspect_scope: Literal["app", "screen", "parent"] = "app",
         assistant_name: str | None = None,
+        cwd: str | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -416,6 +417,7 @@ class Chat(Widget):
             introspect: Auto-discover app widgets and create tools for LLM (default True).
             introspect_scope: Scope for introspection - "app", "screen", or "parent" (default "app").
             assistant_name: Override the assistant's display name (defaults to agent name from ACP or "Assistant").
+            cwd: Working directory for ACP adapter (optional).
             **llm_kwargs: Extra args passed to LiteLLM
         """
         super().__init__(name=name, id=id, classes=classes)
@@ -447,6 +449,7 @@ class Chat(Widget):
         self.introspect = introspect
         self.introspect_scope = introspect_scope
         self.assistant_name = assistant_name  # Override for assistant display name
+        self.cwd = cwd  # Working directory for ACP adapter
         self.llm_kwargs = llm_kwargs
 
         # Adapter state (initialized in on_mount)
@@ -549,7 +552,11 @@ class Chat(Widget):
                 api_base=self.api_base,
             )
             if self._model:
-                self._conversation = self._model.conversation()
+                # Pass cwd to ACP adapter if set
+                if self.cwd and self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+                    self._conversation = self._model.conversation(cwd=self.cwd)  # type: ignore[call-arg]
+                else:
+                    self._conversation = self._model.conversation()
                 self._update_model_status()
         except ValueError as e:
             self._config_error = str(e)
@@ -677,7 +684,11 @@ class Chat(Widget):
                 api_base=self.api_base,
             )
             if self._model:
-                self._conversation = self._model.conversation()
+                # Pass cwd to ACP adapter if set
+                if self.cwd and self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+                    self._conversation = self._model.conversation(cwd=self.cwd)  # type: ignore[call-arg]
+                else:
+                    self._conversation = self._model.conversation()
                 self._update_model_status()
                 self.post_message(self.ModelChanged(model_id))
         except Exception as e:

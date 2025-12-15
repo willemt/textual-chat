@@ -21,7 +21,7 @@ from .chat import INLINE, SEPARATE, Chat
 
 # Advanced components (most users won't need these)
 from .db import ChatDatabase, Conversation, Message
-from .llm_adapter_acp import get_async_model
+from .chat import get_async_model  # Re-export from chat.py (defaults to litellm)
 from .session_storage import get_session_storage
 from .widgets import MessageWidget, ToolUse
 
