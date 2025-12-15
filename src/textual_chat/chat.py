@@ -165,6 +165,84 @@ class ModelSelectModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class AgentSelectModal(ModalScreen[str | None]):
+    """Modal for selecting an ACP agent."""
+
+    DEFAULT_CSS = """
+    AgentSelectModal {
+        align: center middle;
+    }
+    AgentSelectModal > Vertical {
+        width: 60;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: round $primary;
+        padding: 1 2;
+    }
+    AgentSelectModal #title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    AgentSelectModal OptionList {
+        height: auto;
+        max-height: 20;
+    }
+    AgentSelectModal #agent-info {
+        text-align: center;
+        color: $text-muted;
+        height: 1;
+        margin-top: 1;
+    }
+    AgentSelectModal #hint {
+        text-align: center;
+        color: $text-muted;
+        padding-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, agents: list[tuple[str, str, str]], current: str | None = None) -> None:
+        """Initialize modal.
+
+        Args:
+            agents: List of (display_name, agent_command, description) tuples
+            current: Currently selected agent_command
+        """
+        super().__init__()
+        self.agents = agents
+        self.current = current
+        self._agent_info: dict[str, str] = {cmd: desc for _, cmd, desc in agents}
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Select Agent", id="title")
+            options = [
+                Option(f"{'● ' if cmd == self.current else '  '}{name}", id=cmd)
+                for name, cmd, _ in self.agents
+            ]
+            yield OptionList(*options)
+            yield Static("", id="agent-info")
+            yield Static("[i]Enter to select, Escape to cancel[/i]", id="hint")
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        """Update info when option is highlighted."""
+        agent_cmd = event.option.id
+        if agent_cmd and agent_cmd in self._agent_info:
+            info = self._agent_info[agent_cmd]
+            self.query_one("#agent-info", Static).update(f"[i]{info}[/i]")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _ChatInput(TextArea):
     """Multiline input with Enter to submit, Shift+Enter for newlines."""
 
@@ -335,6 +413,7 @@ class Chat(Widget):
     BINDINGS = [
         Binding("ctrl+l", "clear", "Clear", show=True),
         Binding("ctrl+m", "select_model", "Models", show=False),
+        Binding("ctrl+a", "select_agent", "Agents", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -544,6 +623,11 @@ class Chat(Widget):
 
     async def on_mount(self) -> None:
         """Initialize model and show status on mount."""
+        # For ACP adapter with no model specified, show agent selector
+        if self._model_id is None and self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+            self._show_agent_selector()
+            return
+
         # Initialize the adapter model
         try:
             self._model = self._adapter.get_async_model(
@@ -585,7 +669,11 @@ class Chat(Widget):
         if not self._model:
             return
         model_id = self._model.model_id
-        if self.show_model_selector:
+
+        # For ACP adapter, show agent selector hint
+        if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+            self._set_status(f"Using {model_id}. Ctrl+A for agents")
+        elif self.show_model_selector:
             self._set_status(f"Using {model_id}. Ctrl+M for models")
         else:
             self._set_status(f"Using {model_id}")
@@ -656,6 +744,78 @@ class Chat(Widget):
             )
 
         return models
+
+    def _get_available_agents(self) -> list[tuple[str, str, str]]:
+        """Get list of available ACP agents as (display_name, agent_command, description) tuples."""
+        agents = [
+            (
+                "Claude Code",
+                "claude-code-acp",
+                "Anthropic's official CLI agent with web search, bash, and file tools",
+            ),
+            (
+                "OpenCode",
+                "opencode acp",
+                "Open-source alternative agent with similar capabilities",
+            ),
+        ]
+        return agents
+
+    def _show_agent_selector(self) -> None:
+        """Show agent selection modal."""
+        agents = self._get_available_agents()
+        current = self._model.model_id if self._model else None
+        self.app.push_screen(
+            AgentSelectModal(agents, current),
+            self._on_agent_selected,
+        )
+
+    def _on_agent_selected(self, agent_command: str | None) -> None:
+        """Handle agent selection from modal."""
+        if not agent_command:
+            return
+
+        # Set the model ID to the selected agent
+        self._model_id = agent_command
+
+        # Initialize the agent
+        try:
+            self._model = self._adapter.get_async_model(
+                self._model_id,
+                api_key=self.api_key,
+                api_base=self.api_base,
+            )
+            if self._model:
+                # Pass cwd to ACP adapter if set
+                if self.cwd and self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+                    self._conversation = self._model.conversation(cwd=self.cwd)  # type: ignore[call-arg]
+                else:
+                    self._conversation = self._model.conversation()
+                self._update_model_status()
+
+                # Initialize session storage for ACP adapter
+                if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+                    self._session_storage = SessionStorage()
+                    # Check for previous session
+                    if self._model and self._session_storage:
+                        prev_session_data = self._session_storage.get_session(self._model.model_id)
+                        if prev_session_data:
+                            self._pending_session_prompt = True
+                            self._show_session_prompt_in_input()
+
+                # Introspect app and register discovered tools
+                if self.introspect:
+                    self._perform_introspection()
+
+        except Exception as e:
+            self._set_status(f"Failed to initialize agent: {e}")
+            log.exception(f"Failed to initialize agent: {e}")
+
+    def action_select_agent(self) -> None:
+        """Show agent selection modal (ACP adapter only)."""
+        if self._adapter.__name__ != "textual_chat.llm_adapter_acp":
+            return
+        self._show_agent_selector()
 
     def action_select_model(self) -> None:
         """Show model selection modal."""
@@ -845,10 +1005,9 @@ class Chat(Widget):
                     log.warning("🔄 Triggering immediate session load...")
                     try:
                         # Force the conversation to connect and load the session NOW
-                        dummy_chain = self._conversation.chain("", system=self.system)
-                        # Start the iteration to trigger connection
-                        if hasattr(dummy_chain, "_ensure_connection"):
-                            await dummy_chain._ensure_connection()
+                        # Use ensure_connected() instead of creating a dummy chain
+                        if hasattr(self._conversation, "ensure_connected"):
+                            await self._conversation.ensure_connected()
                         log.warning("✅ Session load triggered successfully")
                     except Exception as e:
                         log.warning(f"❌ Failed to trigger session load: {e}")

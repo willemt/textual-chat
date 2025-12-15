@@ -149,6 +149,10 @@ class ACPClientHandler(Client):
         """Handle session updates from the agent."""
         log.debug(f"📨 session_update received: {type(update).__name__}")
 
+        # Log UserMessageChunk to debug concatenation issue
+        if isinstance(update, UserMessageChunk):
+            log.warning(f"⚠️  RECEIVED UserMessageChunk (should NOT queue this): {update.content}")
+
         if isinstance(update, AgentMessageChunk):
             # Text streaming
             content = update.content
@@ -526,6 +530,8 @@ class AsyncChainResponse:
             """Run the prompt and signal completion."""
             nonlocal prompt_error
             log.debug("ACP run_prompt: starting")
+            log.warning(f"🚀 SENDING PROMPT TO AGENT: {repr(self._prompt)}")
+            log.warning(f"   Session ID: {session_id}")
             try:
                 await conn.prompt(session_id=session_id, prompt=[text_block(self._prompt)])
                 log.debug("ACP run_prompt: prompt completed")
