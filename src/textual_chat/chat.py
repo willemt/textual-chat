@@ -394,6 +394,7 @@ class Chat(Widget):
         # Response state
         self._is_responding = False
         self._cancel_requested = False
+        self._response_task: asyncio.Task[None] | None = None
 
         # Register initial tools (smart detection)
         if tools:
@@ -953,87 +954,95 @@ class Chat(Widget):
                 options=options,
             )
 
-            full_text = ""
-            # Track tool calls by ID to correlate start/complete events
-            tool_calls_in_progress: dict[str, tuple[str, dict]] = {}  # id -> (name, arguments)
+            # Run event processing in background task to keep UI responsive
+            full_text_container = {"text": ""}  # Use dict to allow mutation in nested function
+            tool_calls_in_progress: dict[str, tuple[str, dict]] = {}
 
-            async for event in chain:
-                if self._cancel_requested:
-                    break
+            async def process_events_background() -> None:
+                """Process events in background task."""
+                try:
+                    async for event in chain:
+                        if self._cancel_requested:
+                            break
 
-                # Handle different event types
-                if isinstance(event, MessageChunk):
-                    # Text content - write to stream
-                    await assistant_widget.ensure_stream().write(event.text)
-                    full_text += event.text
+                        # Handle different event types
+                        if isinstance(event, MessageChunk):
+                            stream = await assistant_widget.ensure_stream()
+                            await stream.write(event.text)
+                            full_text_container["text"] += event.text
 
-                elif isinstance(event, ThoughtChunk):
-                    # Thinking text - could show in UI later
-                    pass
+                        elif isinstance(event, ThoughtChunk):
+                            pass  # Could show thinking text in future
 
-                elif isinstance(event, ToolCallStart):
-                    # Tool starting - add to UI and track
-                    tu = ToolUse(event.name, event.arguments)
-                    assistant_widget.add_tooluse(tu, event.id)
-                    self._set_status(f"Using {event.name}...")
-                    # Track for correlation with complete event
-                    tool_calls_in_progress[event.id] = (event.name, event.arguments)
+                        elif isinstance(event, ToolCallStart):
+                            tu = ToolUse(event.name, event.arguments)
+                            await assistant_widget.add_tooluse(tu, event.id)
+                            self._set_status(f"Using {event.name}...")
+                            tool_calls_in_progress[event.id] = (event.name, event.arguments)
 
-                elif isinstance(event, ToolCallComplete):
-                    # Tool completed - mark in UI
-                    assistant_widget.complete_tooluse(event.id)
-                    # Post message for any listeners
-                    if event.id in tool_calls_in_progress:
-                        name, arguments = tool_calls_in_progress[event.id]
-                        self.post_message(self.ToolCalled(name, arguments, event.output))
-                        del tool_calls_in_progress[event.id]
-                    self._set_status("Responding...")
+                        elif isinstance(event, ToolCallComplete):
+                            assistant_widget.complete_tooluse(event.id)
+                            if event.id in tool_calls_in_progress:
+                                name, arguments = tool_calls_in_progress[event.id]
+                                self.post_message(self.ToolCalled(name, arguments, event.output))
+                                del tool_calls_in_progress[event.id]
+                            self._set_status("Responding...")
 
-                elif isinstance(event, TokenUsage):
-                    # Token usage - display it
-                    cached = event.cached_tokens
-                    llm_log.debug(
-                        f"=== Token Usage ===\n"
-                        f"Input: {event.prompt_tokens}, Output: {event.completion_tokens}, Cached: {cached}"
+                        elif isinstance(event, TokenUsage):
+                            cached = event.cached_tokens
+                            llm_log.debug(
+                                f"=== Token Usage ===\n"
+                                f"Input: {event.prompt_tokens}, Output: {event.completion_tokens}, Cached: {cached}"
+                            )
+                            if self.show_token_usage:
+                                assistant_widget.set_token_usage(
+                                    event.prompt_tokens, event.completion_tokens, cached
+                                )
+
+                    # Close the stream and mark complete
+                    if assistant_widget._stream:
+                        await assistant_widget._stream.stop()
+                    assistant_widget.mark_complete()
+
+                    # Scroll to bottom
+                    container = self.query_one("#chat-messages", ScrollableContainer)
+                    container.scroll_end(animate=False)
+
+                    llm_log.debug(f"=== LLM Response ===\n{full_text_container['text']}")
+                    self._set_status("")
+                    self.post_message(self.Responded(full_text_container["text"]))
+
+                    # Track assistant response in history
+                    self._message_history.append(
+                        {"role": "assistant", "content": full_text_container["text"]}
                     )
-                    if self.show_token_usage:
-                        assistant_widget.set_token_usage(
-                            event.prompt_tokens, event.completion_tokens, cached
-                        )
 
-                # Yield to event loop so UI can update
-                await asyncio.sleep(0)
+                    self._save_session()
 
-            # Close the stream and mark message complete
-            if assistant_widget._stream:
-                await assistant_widget._stream.stop()
-            assistant_widget.mark_complete()
+                except asyncio.CancelledError:
+                    assistant_widget.mark_complete()
+                    await assistant_widget.update_content("*Cancelled*")
+                    self._set_status("Cancelled")
+                except Exception as e:
+                    assistant_widget.mark_complete()
+                    await assistant_widget.update_error(str(e))
+                    self._set_status(f"Error: {e}")
+                    log.exception(f"Error in background event processing: {e}")
+                finally:
+                    self._is_responding = False
 
-            # Scroll to bottom
-            container = self.query_one("#chat-messages", ScrollableContainer)
-            container.scroll_end(animate=False)
+            # Start background task and store reference
+            self._response_task = asyncio.create_task(process_events_background())
+            # Don't await - let it run in background so UI remains responsive
 
-            llm_log.debug(f"=== LLM Response ===\n{full_text}")
-            self._set_status("")
-            self.post_message(self.Responded(full_text))
-
-            # Track assistant response in history
-            self._message_history.append({"role": "assistant", "content": full_text})
-
-            self._save_session()
-
-        except asyncio.CancelledError:
-            assistant_widget.mark_complete()
-            assistant_widget.update_content("*Cancelled*")
-            self._set_status("Cancelled")
         except Exception as e:
+            # Handle setup errors (errors before background task starts)
+            self._is_responding = False
             assistant_widget.mark_complete()
             error_msg = f"Error: {e}"
-            assistant_widget.update_error(str(e))
+            await assistant_widget.update_error(str(e))
             self._set_status(error_msg)
-            log.exception(f"Error in _send: {e}")
-        finally:
-            self._is_responding = False
+            log.exception(f"Error in _send setup: {e}")
 
     async def _handle_slash_command(self, command: str) -> None:
         """Handle slash commands like /model and /agent."""
@@ -1114,6 +1123,9 @@ class Chat(Widget):
         """Cancel current response."""
         if self._is_responding:
             self._cancel_requested = True
+            # Cancel the background task if it exists
+            if self._response_task and not self._response_task.done():
+                self._response_task.cancel()
             self._set_status("Cancelling...")
 
     # Convenience methods for programmatic use

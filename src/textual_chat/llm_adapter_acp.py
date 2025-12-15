@@ -328,6 +328,7 @@ class AsyncConversation:
         self._cwd: str = cwd or os.getcwd()  # Working directory for agent sessions
         self.init_response: Any = None  # Store initialization response with capabilities
         self._session_loaded: bool = False  # Whether session has been loaded/forked
+        self._session_capabilities: dict[str, bool] = {}  # Available session methods
 
         # Check if we have an existing session for this working directory + agent
         storage = get_session_storage()
@@ -601,8 +602,6 @@ class AsyncChainResponse:
             if isinstance(event, MessageChunk):
                 full_text += event.text
             yield event
-            # Give event loop a chance to process UI updates
-            await asyncio.sleep(0)
 
         log.debug("ACP __aiter__: event loop done")
 

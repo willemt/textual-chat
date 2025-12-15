@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.containers import ScrollableContainer, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
-from textual_golden import BLUE, Golden
+from textual_golden import Golden
 
 
 @dataclass
@@ -50,15 +50,12 @@ def _humanize_tokens(n: int) -> str:
 
 
 class ToolUseWidget(Static):
-    """Widget showing a tool call with spinner (running) or tick (complete)."""
+    """Widget showing a tool call with unfilled circle (running) or filled circle (complete)."""
 
     DEFAULT_CSS = """
     ToolUseWidget {
         height: auto;
         color: $text-muted;
-    }
-    ToolUseWidget Horizontal {
-        height: auto;
     }
     """
 
@@ -70,25 +67,16 @@ class ToolUseWidget(Static):
         self.tool_call_id = tool_call_id
 
     def compose(self) -> ComposeResult:
-        # Spinner for running state
-        spinner = Golden("", colors=BLUE, id="spinner")
-        spinner.styles.width = 2
-        spinner.styles.height = "auto"
-        # Tool text
-        text = Static(f" {self.tool_use}", markup=False, id="tool-text")
-        text.styles.width = "1fr"
-        text.styles.height = "auto"
-        yield Horizontal(spinner, text)
+        # Unfilled circle for running state
+        yield Static(f"○ {self.tool_use}", markup=False, id="tool-text")
 
     def watch_completed(self, completed: bool) -> None:
         """Update display when completed changes."""
         if completed:
-            # Replace spinner with tick
+            # Replace with filled circle
             try:
-                spinner = self.query_one("#spinner", Golden)
-                spinner.remove()
                 text = self.query_one("#tool-text", Static)
-                text.update(f"✓ {self.tool_use}")
+                text.update(f"● {self.tool_use}")
                 text.styles.color = "green"
             except Exception:
                 pass
@@ -165,8 +153,13 @@ class MessageWidget(Widget):
         if loading:
             loading.remove()
 
-    def update_content(self, content: str) -> None:
+    async def update_content(self, content: str) -> None:
         """Replace all content with new markdown."""
+        # Stop any active stream first
+        if self._stream is not None:
+            await self._stream.stop()
+            self._stream = None
+
         self._loading = False
         self._remove_loading()
 
@@ -188,10 +181,6 @@ class MessageWidget(Widget):
 
         # Create new Markdown widget for streaming
         md = Markdown(classes="content")
-        # Special case: add margin-top when markdown follows tool use
-        if self._after_tooluse:
-            md.styles.margin = (1, 0, 0, 0)
-            self._after_tooluse = False
         # Mount before loading indicator to keep it at bottom
         container.mount(md, before=loading)
         self._current_markdown = md
@@ -200,19 +189,33 @@ class MessageWidget(Widget):
         self.call_after_refresh(self._scroll_parent)
         return self._stream
 
-    def ensure_stream(self) -> Any:
+    async def ensure_stream(self) -> Any:
         """Get current stream, or create a new one if needed (returns Markdown.Stream)."""
         if self._stream is None:
+            # Add blank line separator after tools, before new text
+            if self._after_tooluse:
+                container = self._get_content_container()
+                loading = self._get_loading_indicator()
+                # Mount a blank static widget as separator
+                separator = Static("", classes="tool-separator")
+                separator.styles.height = 1
+                container.mount(separator, before=loading)
+                self._after_tooluse = False
+
             return self.get_markdown_stream()
         return self._stream
 
-    def add_tooluse(self, tu: ToolUse, tool_call_id: str) -> None:
-        """Add a tool use widget (shows spinner)."""
-        # If we were streaming, that markdown is now "done"
-        # (text before tools)
+    async def add_tooluse(self, tu: ToolUse, tool_call_id: str) -> None:
+        """Add a tool use widget (shows unfilled circle)."""
+        # If we were streaming, stop it properly before discarding
+        if self._stream is not None:
+            await self._stream.stop()
+            self._stream = None
+
+        # Text before tools is now "done"
         self._current_markdown = None
-        self._stream = None
-        self._after_tooluse = True  # Next markdown gets margin-top
+        # Reset flag - consecutive tools don't need separator
+        self._after_tooluse = False
 
         container = self._get_content_container()
         loading = self._get_loading_indicator()
@@ -223,9 +226,11 @@ class MessageWidget(Widget):
         self.call_after_refresh(self._scroll_parent)
 
     def complete_tooluse(self, tool_call_id: str) -> None:
-        """Mark a tool as complete (shows tick)."""
+        """Mark a tool as complete (shows filled circle)."""
         if tool_call_id in self._tool_widgets:
             self._tool_widgets[tool_call_id].complete()
+        # Set flag so next text gets a separator after this tool
+        self._after_tooluse = True
 
     def mark_complete(self) -> None:
         """Mark the message as complete (removes loading indicator)."""
@@ -249,8 +254,13 @@ class MessageWidget(Widget):
         container.mount(text)
         self.call_after_refresh(self._scroll_parent)
 
-    def update_error(self, error: str) -> None:
+    async def update_error(self, error: str) -> None:
         """Show error message in red."""
+        # Stop any active stream first
+        if self._stream is not None:
+            await self._stream.stop()
+            self._stream = None
+
         self._loading = False
         self._remove_loading()
 
