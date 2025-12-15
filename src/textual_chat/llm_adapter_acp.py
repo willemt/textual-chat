@@ -16,10 +16,12 @@ Requires: pip install agent-client-protocol
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from functools import singledispatch
 from typing import Any, TypedDict
 
 from acp import Client, text_block
@@ -43,6 +45,92 @@ from .session_storage import get_session_storage
 
 log = logging.getLogger(__name__)
 # log.propagate = False  # TEMPORARILY ENABLED FOR DEBUGGING
+
+
+# Singledispatch handlers for session updates
+@singledispatch
+async def _handle_update(update: Any, client: Any) -> None:
+    """Default handler for unknown update types."""
+    log.warning(f"⚠️  Unhandled update type: {type(update).__name__} - {update}")
+
+
+@_handle_update.register
+async def _handle_user_message(update: UserMessageChunk, client: Any) -> None:
+    """Handle user message chunks (debugging only)."""
+    log.warning(f"⚠️  RECEIVED UserMessageChunk (should NOT queue this): {update.content}")
+
+
+@_handle_update.register
+async def _handle_agent_message(update: AgentMessageChunk, client: Any) -> None:
+    """Handle agent message chunks - stream text."""
+    content = update.content
+    if isinstance(content, TextContentBlock):
+        await client._text_chunks.put(content.text)
+
+
+@_handle_update.register
+async def _handle_agent_thought(update: AgentThoughtChunk, client: Any) -> None:
+    """Handle agent thinking chunks - stream thinking text."""
+
+    content = update.content
+    if isinstance(content, TextContentBlock):
+        await client._text_chunks.put(content.text)
+
+
+@_handle_update.register(ToolCallStart)
+@_handle_update.register(ToolCallProgress)
+async def _handle_tool_call(update: ToolCallStart | ToolCallProgress, client: Any) -> None:
+    """Handle tool call start and progress updates."""
+
+    tool_call_id = update.tool_call_id or ""
+    status = update.status or ""
+
+    # Create or get tool call
+    if tool_call_id not in client._tool_calls:
+        # Extract arguments from raw_input
+        arguments: dict[str, Any] = {}
+        if isinstance(update.raw_input, dict):
+            arguments = update.raw_input
+        elif isinstance(update.raw_input, str):
+            # Try to parse JSON string
+            try:
+                parsed = json.loads(update.raw_input)
+                if isinstance(parsed, dict):
+                    arguments = parsed
+            except (json.JSONDecodeError, ValueError):
+                # Not JSON, just note it as raw string
+                arguments = {"input": update.raw_input}
+        elif update.raw_input is not None:
+            # Some other type - just note it
+            arguments = {"value": str(update.raw_input)}
+
+        log.info(
+            f"Tool {update.title}: raw_input type={type(update.raw_input)}, parsed args={arguments} {update}"
+        )
+
+        tc = ToolCall(
+            id=tool_call_id,
+            name=update.title or "",
+            arguments=arguments,
+        )
+        client._tool_calls[tool_call_id] = tc
+
+        # Fire before callback for new tool calls
+        if client._before_call:
+            result = client._before_call(tc)
+            if asyncio.iscoroutine(result):
+                await result
+
+    tc = client._tool_calls[tool_call_id]
+
+    # Fire after callback when completed
+    if status in ("completed", "failed") and client._after_call:
+        output = ""
+        if update.raw_output:
+            output = str(update.raw_output)
+        result = client._after_call(tc, ToolResult(tc.id, output))
+        if asyncio.iscoroutine(result):
+            await result
 
 
 class CacheDetails(TypedDict, total=False):
@@ -146,80 +234,9 @@ class ACPClientHandler(Client):
         ),
         **kwargs: Any,
     ) -> None:
-        """Handle session updates from the agent."""
-        log.debug(f"📨 session_update received: {type(update).__name__}")
-
-        # Log UserMessageChunk to debug concatenation issue
-        if isinstance(update, UserMessageChunk):
-            log.warning(f"⚠️  RECEIVED UserMessageChunk (should NOT queue this): {update.content}")
-
-        if isinstance(update, AgentMessageChunk):
-            # Text streaming
-            content = update.content
-            if isinstance(content, TextContentBlock):
-                await self._text_chunks.put(content.text)
-
-        elif isinstance(update, AgentThoughtChunk):
-            # Thinking/reasoning text streaming
-            content = update.content
-            if isinstance(content, TextContentBlock):
-                # Stream thinking chunks just like regular text
-                # The UI can decide how to display them (e.g., differently styled)
-                await self._text_chunks.put(content.text)
-
-        elif isinstance(update, (ToolCallStart, ToolCallProgress)):
-            # Tool call update
-            tool_call_id = update.tool_call_id or ""
-            status = update.status or ""
-
-            # Create or get tool call
-            if tool_call_id not in self._tool_calls:
-                # Extract arguments from raw_input
-                arguments: dict[str, Any] = {}
-                if isinstance(update.raw_input, dict):
-                    arguments = update.raw_input
-                elif isinstance(update.raw_input, str):
-                    # Try to parse JSON string
-                    import json
-
-                    try:
-                        parsed = json.loads(update.raw_input)
-                        if isinstance(parsed, dict):
-                            arguments = parsed
-                    except (json.JSONDecodeError, ValueError):
-                        # Not JSON, just note it as raw string
-                        arguments = {"input": update.raw_input}
-                elif update.raw_input is not None:
-                    # Some other type - just note it
-                    arguments = {"value": str(update.raw_input)}
-
-                log.debug(
-                    f"Tool {update.title}: raw_input type={type(update.raw_input)}, parsed args={arguments}"
-                )
-
-                tc = ToolCall(
-                    id=tool_call_id,
-                    name=update.title or "",
-                    arguments=arguments,
-                )
-                self._tool_calls[tool_call_id] = tc
-
-                # Fire before callback for new tool calls
-                if self._before_call:
-                    result = self._before_call(tc)
-                    if asyncio.iscoroutine(result):
-                        await result
-
-            tc = self._tool_calls[tool_call_id]
-
-            # Fire after callback when completed
-            if status in ("completed", "failed") and self._after_call:
-                output = ""
-                if update.raw_output:
-                    output = str(update.raw_output)
-                result = self._after_call(tc, ToolResult(tc.id, output))
-                if asyncio.iscoroutine(result):
-                    await result
+        """Handle session updates from the agent using singledispatch."""
+        log.debug(f"📨 session_update received: {type(update).__name__} {update} {kwargs}")
+        await _handle_update(update, self)
 
     async def request_permission(
         self, options: Any, session_id: str, tool_call: Any, **kwargs: Any
