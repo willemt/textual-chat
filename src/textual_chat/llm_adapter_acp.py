@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import singledispatch
 from typing import Any, TypedDict
@@ -35,12 +35,13 @@ from acp.schema import (
     CurrentModeUpdate,
     RequestPermissionResponse,
     TextContentBlock,
-    ToolCallProgress,
-    ToolCallStart,
+    ToolCallProgress as ACPToolCallProgress,
+    ToolCallStart as ACPToolCallStart,
     UserMessageChunk,
 )
 
 from .agent_manager import get_agent_manager
+from .events import MessageChunk, ThoughtChunk, ToolCallComplete, ToolCallStart, ToolCallProgress
 from .session_storage import get_session_storage
 
 log = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ async def _handle_agent_message(update: AgentMessageChunk, client: Any) -> None:
     """Handle agent message chunks - stream text."""
     content = update.content
     if isinstance(content, TextContentBlock):
-        await client._text_chunks.put(content.text)
+        await client._events.put(MessageChunk(content.text))
 
 
 @_handle_update.register
@@ -74,12 +75,12 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: Any) -> None:
 
     content = update.content
     if isinstance(content, TextContentBlock):
-        await client._text_chunks.put(content.text)
+        await client._events.put(ThoughtChunk(content.text))
 
 
-@_handle_update.register(ToolCallStart)
-@_handle_update.register(ToolCallProgress)
-async def _handle_tool_call(update: ToolCallStart | ToolCallProgress, client: Any) -> None:
+@_handle_update.register(ACPToolCallStart)
+@_handle_update.register(ACPToolCallProgress)
+async def _handle_tool_call(update: ACPToolCallStart | ACPToolCallProgress, client: Any) -> None:
     """Handle tool call start and progress updates."""
 
     tool_call_id = update.tool_call_id or ""
@@ -108,29 +109,29 @@ async def _handle_tool_call(update: ToolCallStart | ToolCallProgress, client: An
             f"Tool {update.title}: raw_input type={type(update.raw_input)}, parsed args={arguments} {update}"
         )
 
+        tool_name = update.title or ""
+
+        # Track the tool call
         tc = ToolCall(
             id=tool_call_id,
-            name=update.title or "",
+            name=tool_name,
             arguments=arguments,
         )
         client._tool_calls[tool_call_id] = tc
 
-        # Fire before callback for new tool calls
-        if client._before_call:
-            result = client._before_call(tc)
-            if asyncio.iscoroutine(result):
-                await result
+        # Emit ToolCallStart event
+        await client._events.put(
+            ToolCallStart(id=tool_call_id, name=tool_name, arguments=arguments)
+        )
 
-    tc = client._tool_calls[tool_call_id]
-
-    # Fire after callback when completed
-    if status in ("completed", "failed") and client._after_call:
+    # Emit progress/completion events
+    if status == "in_progress":
+        await client._events.put(ToolCallProgress(id=tool_call_id, status=status))
+    elif status in ("completed", "failed"):
         output = ""
         if update.raw_output:
             output = str(update.raw_output)
-        result = client._after_call(tc, ToolResult(tc.id, output))
-        if asyncio.iscoroutine(result):
-            await result
+        await client._events.put(ToolCallComplete(id=tool_call_id, output=output))
 
 
 class CacheDetails(TypedDict, total=False):
@@ -203,21 +204,17 @@ class ACPClientHandler(Client):
     """Handles ACP client callbacks for session updates."""
 
     def __init__(self) -> None:
-        self._text_chunks: asyncio.Queue[str | None] = asyncio.Queue()
-        self._tool_calls: dict[str, ToolCall] = {}
-        self._before_call: Callable[[ToolCall], Any] | None = None
-        self._after_call: Callable[[ToolCall, ToolResult], Any] | None = None
+        from .events import StreamEvent
 
-    def reset_for_turn(
-        self,
-        before_call: Callable[[ToolCall], Any] | None = None,
-        after_call: Callable[[ToolCall, ToolResult], Any] | None = None,
-    ) -> None:
+        self._events: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+        self._tool_calls: dict[str, ToolCall] = {}
+
+    def reset_for_turn(self) -> None:
         """Reset state for a new turn."""
-        self._text_chunks = asyncio.Queue()
+        from .events import StreamEvent
+
+        self._events = asyncio.Queue()
         self._tool_calls = {}
-        self._before_call = before_call
-        self._after_call = after_call
 
     async def session_update(
         self,
@@ -226,8 +223,8 @@ class ACPClientHandler(Client):
             UserMessageChunk
             | AgentMessageChunk
             | AgentThoughtChunk
-            | ToolCallStart
-            | ToolCallProgress
+            | ACPToolCallStart
+            | ACPToolCallProgress
             | AgentPlanUpdate
             | AvailableCommandsUpdate
             | CurrentModeUpdate
@@ -317,7 +314,7 @@ class ACPClientHandler(Client):
 
     def signal_done(self) -> None:
         """Signal that streaming is complete."""
-        self._text_chunks.put_nowait(None)
+        self._events.put_nowait(None)
 
 
 class AsyncConversation:
@@ -354,8 +351,6 @@ class AsyncConversation:
         *,
         system: str | None = None,
         tools: list[Callable] | None = None,
-        before_call: Callable[[ToolCall], Any] | None = None,
-        after_call: Callable[[ToolCall, ToolResult], Any] | None = None,
         options: dict | None = None,
     ) -> AsyncChainResponse:
         """Execute prompt with the ACP agent.
@@ -364,19 +359,15 @@ class AsyncConversation:
             prompt: User message
             system: System prompt (may not be supported by all agents)
             tools: Not used for ACP (agent has its own tools)
-            before_call: Called when agent starts a tool
-            after_call: Called when agent completes a tool
             options: Additional options
 
         Returns:
-            AsyncChainResponse that yields text chunks
+            AsyncChainResponse that yields events (MessageChunk, ToolCallStart, etc.)
         """
         return AsyncChainResponse(
             conversation=self,
             prompt=prompt,
             system=system,
-            before_call=before_call,
-            after_call=after_call,
         )
 
     async def ensure_connected(self) -> None:
@@ -437,14 +428,10 @@ class AsyncChainResponse:
         conversation: AsyncConversation,
         prompt: str,
         system: str | None,
-        before_call: Callable | None,
-        after_call: Callable | None,
     ) -> None:
         self._conversation = conversation
         self._prompt = prompt
         self._system = system
-        self._before_call = before_call
-        self._after_call = after_call
         self._responses: list[AsyncResponse] = []
         self._current_response: AsyncResponse | None = None
         self._iterated = False
@@ -555,31 +542,33 @@ class AsyncChainResponse:
 
         # Reset client for this turn
         if conv._client:
-            conv._client.reset_for_turn(
-                before_call=self._before_call,
-                after_call=self._after_call,
-            )
+            conv._client.reset_for_turn()
 
         # Ensure types are correct for return
         assert conv._session_id is not None
         assert conv._client is not None
         return conv._conn, conv._session_id, conv._client
 
-    async def __aiter__(self) -> AsyncIterator[str]:
-        """Iterate over text chunks from the agent."""
+    async def __aiter__(self) -> AsyncGenerator[Any, None]:
+        """Iterate over events from the agent."""
+        from .events import MessageChunk, StreamEvent
+
         self._iterated = True
 
         log.debug("ACP __aiter__: starting")
         conn, session_id, client = await self._ensure_connection()
         log.debug(f"ACP __aiter__: connection ready, session_id={session_id}")
 
+        # Reset client for new turn
+        client.reset_for_turn()
+
         # Create response tracker
         self._current_response = AsyncResponse()
         self._responses.append(self._current_response)
 
         full_text = ""
-        chunks_collected: list[str] = []
         prompt_error: Exception | None = None
+        prompt_task: asyncio.Task | None = None
 
         async def run_prompt() -> None:
             """Run the prompt and signal completion."""
@@ -594,34 +583,33 @@ class AsyncChainResponse:
                 log.debug(f"ACP run_prompt: error {e}")
                 prompt_error = e
             finally:
-                # Signal end of chunks
-                await client._text_chunks.put(None)
+                # Signal end of events
+                await client._events.put(None)
                 log.debug("ACP run_prompt: signaled done")
 
-        async def collect_chunks() -> None:
-            """Collect chunks from the queue."""
-            log.debug("ACP collect_chunks: starting")
-            while True:
-                chunk = await client._text_chunks.get()
-                log.debug(f"ACP collect_chunks: got chunk {repr(chunk)[:50]}")
-                if chunk is None:
-                    break
-                chunks_collected.append(chunk)
-            log.debug(f"ACP collect_chunks: done, {len(chunks_collected)} chunks")
+        # Start prompt task in background
+        log.debug("ACP __aiter__: starting prompt task")
+        prompt_task = asyncio.create_task(run_prompt())
 
-        # Run both tasks concurrently
-        log.debug("ACP __aiter__: starting gather")
-        await asyncio.gather(run_prompt(), collect_chunks())
-        log.debug("ACP __aiter__: gather completed")
+        # Yield events as they arrive in real-time
+        log.debug("ACP __aiter__: starting event loop")
+        while True:
+            event = await client._events.get()
+            log.debug(f"ACP __aiter__: got event {type(event).__name__ if event else None}")
+            if event is None:
+                break
+            if isinstance(event, MessageChunk):
+                full_text += event.text
+            yield event
+            # Give event loop a chance to process UI updates
+            await asyncio.sleep(0)
 
-        # Re-raise prompt errors
+        log.debug("ACP __aiter__: event loop done")
+
+        # Wait for prompt task to complete and check for errors
+        await prompt_task
         if prompt_error:
             raise prompt_error
-
-        # Yield all collected chunks
-        for chunk in chunks_collected:
-            full_text += chunk
-            yield chunk
 
         self._current_response._text = full_text
         log.debug(f"ACP __aiter__: done, text={repr(full_text)[:50]}")

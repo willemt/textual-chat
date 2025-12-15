@@ -241,8 +241,6 @@ class AsyncConversation:
         *,
         system: str | None = None,
         tools: list[Callable] | None = None,
-        before_call: Callable[[ToolCall], Any] | None = None,
-        after_call: Callable[[ToolCall, ToolResult], Any] | None = None,
         options: dict | None = None,
     ) -> AsyncChainResponse:
         """Execute prompt with automatic tool calling loop.
@@ -251,20 +249,16 @@ class AsyncConversation:
             prompt: User message
             system: System prompt
             tools: List of callable functions to use as tools
-            before_call: Called before each tool execution
-            after_call: Called after each tool execution
             options: Additional options (e.g., {"cache": True})
 
         Returns:
-            AsyncChainResponse that yields text chunks and handles tool calls
+            AsyncChainResponse that yields events (MessageChunk, ToolCallStart, etc.)
         """
         return AsyncChainResponse(
             conversation=self,
             prompt=prompt,
             system=system,
             tools=tools,
-            before_call=before_call,
-            after_call=after_call,
             options=options or {},
         )
 
@@ -274,7 +268,7 @@ class AsyncConversation:
 
 
 class AsyncChainResponse:
-    """Async iterator that yields text chunks and handles tool calls automatically."""
+    """Async iterator that yields events (MessageChunk, ToolCallStart, etc.)."""
 
     def __init__(
         self,
@@ -282,16 +276,12 @@ class AsyncChainResponse:
         prompt: str,
         system: str | None,
         tools: list[Callable] | None,
-        before_call: Callable | None,
-        after_call: Callable | None,
         options: dict,
     ):
         self._conversation = conversation
         self._prompt = prompt
         self._system = system
         self._tools = tools or []
-        self._before_call = before_call
-        self._after_call = after_call
         self._options = options
 
         # Build tool schemas and lookup
@@ -351,12 +341,16 @@ class AsyncChainResponse:
 
         return kwargs
 
-    async def __aiter__(self) -> AsyncGenerator[str, None]:
-        """Iterate over text chunks, automatically handling tool calls."""
+    async def __aiter__(self) -> AsyncGenerator[Any, None]:
+        """Iterate over events from the model."""
+        from .events import MessageChunk, TokenUsage
+
         self._iterated = True
 
         # Add user message to history
         self._conversation._messages.append({"role": "user", "content": self._prompt})
+
+        total_usage: Usage | None = None
 
         while True:
             kwargs = self._build_kwargs()
@@ -379,10 +373,10 @@ class AsyncChainResponse:
                 if chunk.choices and chunk.choices[0].delta:
                     delta = chunk.choices[0].delta
 
-                    # Yield text content
+                    # Yield text content as MessageChunk events
                     if delta.content:
                         full_content += delta.content
-                        yield delta.content
+                        yield MessageChunk(delta.content)
 
                     # Collect tool calls
                     if delta.tool_calls:
@@ -406,6 +400,7 @@ class AsyncChainResponse:
                     output=getattr(usage, "completion_tokens", 0) or 0,
                     details=_extract_cache_details(usage),
                 )
+                total_usage = self._current_response._usage
 
             self._current_response._text = full_content
 
@@ -441,21 +436,26 @@ class AsyncChainResponse:
                 }
             )
 
-            async for tool_call, tool_result in self.do_tool_calls(tool_calls_data):
-                self._conversation._messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_result.output,
-                    }
-                )
+            # Handle tool calls and emit events
+            async for event in self._handle_tool_calls(tool_calls_data):
+                yield event
 
-    async def do_tool_calls(
+        # Emit final token usage
+        if total_usage:
+            yield TokenUsage(
+                prompt_tokens=total_usage.input,
+                completion_tokens=total_usage.output,
+                cached_tokens=total_usage.details.get("cached_tokens", 0)
+                or total_usage.details.get("cache_read_input_tokens", 0),
+            )
+
+    async def _handle_tool_calls(
         self, tool_calls_data: list[dict[str, Any]]
-    ) -> AsyncGenerator[tuple[ToolCall, ToolResult], None]:
-        """Execute tool calls: sync tools first, then async tools in parallel."""
+    ) -> AsyncGenerator[Any, None]:
+        """Parse tool calls, execute them, and emit events."""
+        from .events import ToolCallComplete, ToolCallStart
 
-        # Parse all tool calls and fire before callbacks
+        # Parse all tool calls and emit ToolCallStart events
         tool_calls: list[ToolCall] = []
         for tc_data in tool_calls_data:
             if not tc_data["name"]:
@@ -467,11 +467,12 @@ class AsyncChainResponse:
             )
             tool_calls.append(tool_call)
 
-            # Before callback
-            if self._before_call:
-                result = self._before_call(tool_call)
-                if asyncio.iscoroutine(result):
-                    await result
+            # Emit ToolCallStart event
+            yield ToolCallStart(
+                id=tool_call.id,
+                name=tool_call.name,
+                arguments=tool_call.arguments,
+            )
 
         # Separate sync vs async tools
         sync_calls: list[tuple[ToolCall, Callable]] = []
@@ -488,45 +489,50 @@ class AsyncChainResponse:
                 sync_calls.append((tc, func))
 
         # Results dict keyed by tool_call.id to maintain order
-        results: dict[str, ToolResult] = {}
+        results: dict[str, str] = {}
 
-        # Execute sync tools (fast, do them first)
+        # Execute sync tools
         for tc, func in sync_calls:
             try:
                 output = str(func(**tc.arguments))
             except Exception as e:
                 output = f"Error: {e}"
-            results[tc.id] = ToolResult(tool_call_id=tc.id, output=output)
+            results[tc.id] = output
 
         # Execute async tools in parallel
-        async def run_async_tool(tc: ToolCall, func: Callable) -> tuple[str, ToolResult]:
+        async def run_async_tool(tc: ToolCall, func: Callable) -> tuple[str, str]:
             try:
                 output = str(await func(**tc.arguments))
             except Exception as e:
                 output = f"Error: {e}"
-            return tc.id, ToolResult(tool_call_id=tc.id, output=output)
+            return tc.id, output
 
         if async_calls:
             async_results = await asyncio.gather(
                 *(run_async_tool(tc, func) for tc, func in async_calls)
             )
-            for tc_id, result in async_results:
-                results[tc_id] = result
+            for tc_id, output in async_results:
+                results[tc_id] = output
 
         # Handle unknown tools
         for tc in unknown_calls:
-            results[tc.id] = ToolResult(tool_call_id=tc.id, output=f"Unknown tool: {tc.name}")
+            results[tc.id] = f"Unknown tool: {tc.name}"
 
-        # Yield results in original order, firing after callbacks
+        # Emit ToolCallComplete events and add to conversation history
         for tc in tool_calls:
-            tool_result = results[tc.id]
+            output = results[tc.id]
 
-            if self._after_call:
-                result = self._after_call(tc, tool_result)
-                if asyncio.iscoroutine(result):
-                    await result
+            # Emit ToolCallComplete event
+            yield ToolCallComplete(id=tc.id, output=output)
 
-            yield tc, tool_result
+            # Add to conversation history
+            self._conversation._messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": output,
+                }
+            )
 
     async def responses(self) -> AsyncGenerator[AsyncResponse, None]:
         """Iterate over response objects (for usage info)."""

@@ -937,37 +937,72 @@ class Chat(Widget):
             # Build options for caching
             options = {"cache": self._model.is_claude} if self._model else {}
 
-            # Callbacks for tool display
-            def before_tool(tc: ToolCall) -> None:
-                tu = ToolUse(tc.name, tc.arguments)
-                assistant_widget.add_tooluse(tu, tc.id)
-                self._set_status(f"Using {tc.name}...")
+            # Use adapter's chain() for automatic tool handling (event-based streaming)
+            from .events import (
+                MessageChunk,
+                ThoughtChunk,
+                ToolCallStart,
+                ToolCallComplete,
+                TokenUsage,
+            )
 
-            def after_tool(tc: ToolCall, result: ToolResult) -> None:
-                assistant_widget.complete_tooluse(tc.id)
-                self.post_message(self.ToolCalled(tc.name, tc.arguments, result.output))
-                self._set_status("Responding...")
-
-            # Use adapter's chain() for automatic tool handling
             chain = self._conversation.chain(
                 content,
                 system=self.system,
                 tools=tools,
-                before_call=before_tool,
-                after_call=after_tool,
                 options=options,
             )
 
             full_text = ""
+            # Track tool calls by ID to correlate start/complete events
+            tool_calls_in_progress: dict[str, tuple[str, dict]] = {}  # id -> (name, arguments)
 
-            async for chunk in chain:
+            async for event in chain:
                 if self._cancel_requested:
                     break
 
-                # Get stream (creates new one after tool use)
-                await assistant_widget.ensure_stream().write(chunk)
+                # Handle different event types
+                if isinstance(event, MessageChunk):
+                    # Text content - write to stream
+                    await assistant_widget.ensure_stream().write(event.text)
+                    full_text += event.text
 
-                full_text += chunk
+                elif isinstance(event, ThoughtChunk):
+                    # Thinking text - could show in UI later
+                    pass
+
+                elif isinstance(event, ToolCallStart):
+                    # Tool starting - add to UI and track
+                    tu = ToolUse(event.name, event.arguments)
+                    assistant_widget.add_tooluse(tu, event.id)
+                    self._set_status(f"Using {event.name}...")
+                    # Track for correlation with complete event
+                    tool_calls_in_progress[event.id] = (event.name, event.arguments)
+
+                elif isinstance(event, ToolCallComplete):
+                    # Tool completed - mark in UI
+                    assistant_widget.complete_tooluse(event.id)
+                    # Post message for any listeners
+                    if event.id in tool_calls_in_progress:
+                        name, arguments = tool_calls_in_progress[event.id]
+                        self.post_message(self.ToolCalled(name, arguments, event.output))
+                        del tool_calls_in_progress[event.id]
+                    self._set_status("Responding...")
+
+                elif isinstance(event, TokenUsage):
+                    # Token usage - display it
+                    cached = event.cached_tokens
+                    llm_log.debug(
+                        f"=== Token Usage ===\n"
+                        f"Input: {event.prompt_tokens}, Output: {event.completion_tokens}, Cached: {cached}"
+                    )
+                    if self.show_token_usage:
+                        assistant_widget.set_token_usage(
+                            event.prompt_tokens, event.completion_tokens, cached
+                        )
+
+                # Yield to event loop so UI can update
+                await asyncio.sleep(0)
 
             # Close the stream and mark message complete
             if assistant_widget._stream:
@@ -977,24 +1012,6 @@ class Chat(Widget):
             # Scroll to bottom
             container = self.query_one("#chat-messages", ScrollableContainer)
             container.scroll_end(animate=False)
-
-            # Get token usage from final response (per-message, not cumulative)
-            last_usage = None
-            async for resp in chain.responses():
-                usage = await resp.usage()
-                if usage:
-                    last_usage = usage
-
-            if last_usage:
-                cached = last_usage.details.get(
-                    "cache_read_input_tokens", 0
-                ) or last_usage.details.get("cached_tokens", 0)
-                llm_log.debug(
-                    f"=== Token Usage ===\n"
-                    f"Input: {last_usage.input}, Output: {last_usage.output}, Cached: {cached}"
-                )
-                if self.show_token_usage:
-                    assistant_widget.set_token_usage(last_usage.input, last_usage.output, cached)
 
             llm_log.debug(f"=== LLM Response ===\n{full_text}")
             self._set_status("")
