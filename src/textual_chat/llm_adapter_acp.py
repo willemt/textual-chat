@@ -76,7 +76,7 @@ log = logging.getLogger(__name__)
 
 
 def _is_acp_client_capability(update: ACPToolCallStart | ACPToolCallProgress) -> bool:
-    """Check if a tool call is an ACP client capability (Read/Write File).
+    """Check if a tool call is an ACP client capability (Read/Write File, Terminal).
 
     These calls will emit their own events from the capability methods with proper arguments,
     so we should mute the events that come from the agent's ACPToolCallStart updates.
@@ -84,7 +84,7 @@ def _is_acp_client_capability(update: ACPToolCallStart | ACPToolCallProgress) ->
     if hasattr(update, "field_meta") and update.field_meta:
         claude_meta = update.field_meta.get("claudeCode", {})
         tool_name_meta = claude_meta.get("toolName", "")
-        return tool_name_meta in ("mcp__acp__Read", "mcp__acp__Write")
+        return tool_name_meta in ("mcp__acp__Read", "mcp__acp__Write", "mcp__acp__Bash")
     return False
 
 
@@ -311,47 +311,26 @@ class ACPClientHandler(Client):
         tool_call: ToolCallUpdate,
         **kwargs: JSON,
     ) -> RequestPermissionResponse:
-        """Handle permission requests - emit event and wait for user response."""
-        # Generate unique request ID
-        request_id = str(uuid.uuid4())
+        """Handle permission requests - automatically approve for now.
 
-        # Create a future for the response
-        future: asyncio.Future[RequestPermissionResponse] = asyncio.Future()
-        self._permission_responses[request_id] = future
+        TODO: Implement UI for permission requests when needed.
+        For now, we auto-approve by selecting the first option.
+        """
+        from acp.schema import AllowedOutcome
 
-        # Convert options and tool_call to dicts for the event
-        options_dicts = [
-            {
-                "option_id": opt.option_id,
-                "name": opt.name,
-                "kind": opt.kind,
-            }
-            for opt in options
-        ]
+        # Auto-approve by selecting the first option
+        if not options:
+            log.warning("⚠️ Permission request with no options, cannot auto-approve")
+            raise ValueError("Permission request must have at least one option")
 
-        tool_call_dict = {
-            "tool_call_id": tool_call.tool_call_id,
-            "title": tool_call.title,
-            "raw_input": tool_call.raw_input,
-            "status": tool_call.status,
-        }
-
-        # Emit permission request event
-        await self._events.put(
-            PermissionRequest(
-                request_id=request_id,
-                session_id=session_id,
-                tool_call=tool_call_dict,
-                options=options_dicts,
-            )
+        option_id = options[0].option_id
+        log.info(
+            f"🔓 Auto-approving permission request: {tool_call.title} (option: {options[0].name})"
         )
 
-        # Wait for user to respond
-        log.info(f"⏳ Waiting for permission response for request {request_id}")
-        response = await future
-        log.info(f"✅ Received permission response for request {request_id}: {response}")
-
-        return response
+        return RequestPermissionResponse(
+            outcome=AllowedOutcome(option_id=option_id, outcome="selected")
+        )
 
     # File system methods - implement with cwd support
     async def write_text_file(
@@ -488,20 +467,37 @@ class ACPClientHandler(Client):
         session_cwd = self._sessions.get(session_id, os.getcwd())
         working_dir = cwd or session_cwd
 
-        # Build command line
-        cmd_parts = [command]
+        # Build command line - combine command and args for shell execution
         if args:
-            cmd_parts.extend(args)
+            # Join command and args with spaces
+            full_command = command + " " + " ".join(args)
+        else:
+            full_command = command
 
-        log.info(f"🖥️  Creating terminal in {working_dir}: {' '.join(cmd_parts)}")
+        log.info(f"🖥️  Creating terminal in {working_dir}: {full_command}")
+
+        # Emit ToolCallStart event for UI display
+        tool_call_id = str(uuid.uuid4())
+        arguments: dict[str, JSON] = {"command": command}
+        if args:
+            arguments["args"] = cast(JSON, args)
+        await self._events.put(ToolCallStart(id=tool_call_id, name="Terminal", arguments=arguments))
+
+        # Build environment dict if provided
+        env_dict = None
+        if env:
+            env_dict = os.environ.copy()
+            for env_var in env:
+                env_dict[env_var.name] = env_var.value
 
         try:
-            # Start process
-            process = await asyncio.create_subprocess_exec(
-                *cmd_parts,
+            # Start process using shell (to support operators like &&, |, etc.)
+            process = await asyncio.create_subprocess_shell(
+                full_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # Merge stderr into stdout
                 cwd=working_dir,
+                env=env_dict,
             )
 
             # Generate terminal ID
@@ -509,6 +505,9 @@ class ACPClientHandler(Client):
 
             # Store process
             self._terminals[terminal_id] = process
+
+            # Emit ToolCallComplete event
+            await self._events.put(ToolCallComplete(id=tool_call_id, output=""))
 
             return CreateTerminalResponse(terminal_id=terminal_id)
         except Exception as e:
