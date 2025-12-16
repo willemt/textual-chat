@@ -754,16 +754,32 @@ class Chat(Widget):
     def _show_session_prompt_in_input(self) -> None:
         """Replace the input with session resumption prompt."""
         try:
+            log.warning("🔔 _show_session_prompt_in_input: Starting")
+
             # Remove the text input
-            text_input = self.query_one("#chat-input", _ChatInput)
-            text_input.remove()
+            try:
+                text_input = self.query_one("#chat-input", _ChatInput)
+                log.warning(f"   Found text input: {text_input}")
+                text_input.remove()
+                log.warning("   Removed text input")
+            except Exception as e:
+                log.error(f"   Failed to find/remove text input: {e}")
+                raise
 
             # Add the session prompt in its place
-            input_area = self.query_one("#chat-input-area")
-            prompt = SessionPromptInput(id="session-prompt")
-            input_area.mount(prompt)
+            try:
+                input_area = self.query_one("#chat-input-area")
+                log.warning(f"   Found input area: {input_area}")
+                prompt = SessionPromptInput(id="session-prompt")
+                log.warning(f"   Created prompt widget: {prompt}")
+                input_area.mount(prompt)
+                log.warning("   Mounted prompt widget")
+            except Exception as e:
+                log.error(f"   Failed to mount prompt: {e}")
+                raise
+
         except Exception as e:
-            log.exception(f"Failed to show session prompt: {e}")
+            log.exception(f"❌ Failed to show session prompt: {e}")
 
     def _add_message(
         self,

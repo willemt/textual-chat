@@ -15,33 +15,29 @@ class SessionPromptInput(Widget):
     DEFAULT_CSS = """
     SessionPromptInput {
         height: auto;
-        min-height: 3;
         width: 100%;
-        border: round $surface-lighten-1;
-        background: transparent;
-        padding: 1 0;
+        border: round $accent;
+        background: $surface;
+        padding: 1;
     }
 
     SessionPromptInput Horizontal {
         height: auto;
         width: 100%;
+        align: left middle;
     }
 
-    SessionPromptInput #prompt-text {
-
-        content-align-vertical: middle;
+    SessionPromptInput Label {
+        width: auto;
+        height: auto;
+        padding: 0 1 0 0;
+        content-align: left middle;
     }
 
     SessionPromptInput Button {
-        margin: 0 1;
-        min-width: 8;
-    }
-
-    Label {
-        width: 100%;
-        height: 1fr;
-        padding: 1;
-        color: white;
+        margin-left: 1;
+        min-width: 7;
+        height: 3;
     }
     """
 
@@ -55,9 +51,7 @@ class SessionPromptInput(Widget):
     def compose(self) -> ComposeResult:
         with Horizontal():
             yield Label("Previous session found, use?", id="prompt-text")
-            yield Button(
-                "Yes", variant="success", id="btn-yes", flat=True, compact=True
-            )
+            yield Button("Yes", variant="success", id="btn-yes", flat=True, compact=True)
             yield Button("No", variant="error", id="btn-no", flat=True, compact=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

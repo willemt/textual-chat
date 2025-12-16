@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from acp import PROTOCOL_VERSION, connect_to_agent
-from acp.schema import ClientCapabilities, Implementation
+from acp.schema import ClientCapabilities, FileSystemCapability, Implementation
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +87,13 @@ class SharedAgentConnection:
             # Initialize
             self.init_response = await self._conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
-                client_capabilities=ClientCapabilities(),
+                client_capabilities=ClientCapabilities(
+                    fs=FileSystemCapability(
+                        read_text_file=True,
+                        write_text_file=True,
+                    ),
+                    terminal=True,
+                ),
                 client_info=Implementation(
                     name="textual-chat", title="Textual Chat", version="0.1.0"
                 ),

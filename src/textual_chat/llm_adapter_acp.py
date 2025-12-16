@@ -33,10 +33,12 @@ from acp.schema import (
     AvailableCommandsUpdate,
     CreateTerminalResponse,
     CurrentModeUpdate,
+    PermissionOption,
     RequestPermissionResponse,
     TextContentBlock,
     ToolCallProgress as ACPToolCallProgress,
     ToolCallStart as ACPToolCallStart,
+    ToolCallUpdate,
     UserMessageChunk,
 )
 
@@ -76,6 +78,18 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: Any) -> None:
     content = update.content
     if isinstance(content, TextContentBlock):
         await client._events.put(ThoughtChunk(content.text))
+
+
+@_handle_update.register
+async def _handle_plan_update(update: AgentPlanUpdate, client: Any) -> None:
+    """Handle agent plan updates - log for now."""
+    log.info(f"📋 Plan Update received: {len(update.entries)} entries")
+    for entry in update.entries:
+        status_icon = (
+            "⏳" if entry.status == "pending" else "🔄" if entry.status == "in_progress" else "✅"
+        )
+        log.info(f"  {status_icon} [{entry.priority}] {entry.content}")
+    # TODO: Emit PlanUpdate event for UI display
 
 
 @_handle_update.register(ACPToolCallStart)
@@ -208,6 +222,13 @@ class ACPClientHandler(Client):
 
         self._events: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
         self._tool_calls: dict[str, ToolCall] = {}
+        self._sessions: dict[str, str] = {}  # session_id -> cwd mapping
+        self._terminals: dict[str, asyncio.subprocess.Process] = {}  # terminal_id -> process
+
+    def register_session(self, session_id: str, cwd: str) -> None:
+        """Register a session's working directory."""
+        self._sessions[session_id] = cwd
+        log.debug(f"Registered session {session_id} with cwd: {cwd}")
 
     def reset_for_turn(self) -> None:
         """Reset state for a new turn."""
@@ -236,67 +257,252 @@ class ACPClientHandler(Client):
         await _handle_update(update, self)
 
     async def request_permission(
-        self, options: Any, session_id: str, tool_call: Any, **kwargs: Any
+        self,
+        options: list[PermissionOption],
+        session_id: str,
+        tool_call: ToolCallUpdate,
+        **kwargs: Any,
     ) -> RequestPermissionResponse:
         """Handle permission requests - auto-approve for now."""
         # Auto-approve by selecting the first option if available
-        option_id = options[0].id if options and len(options) > 0 else "approved"
+        option_id = options[0].option_id if options else "approved"
         return RequestPermissionResponse(
             outcome=AllowedOutcome(option_id=option_id, outcome="selected")
         )
 
-    # File system methods - raise not found for now
-    async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any) -> Any:
-        from acp import RequestError
+    # File system methods - implement with cwd support
+    async def write_text_file(
+        self, content: str = "", path: str = "", session_id: str = "", **kwargs: Any
+    ) -> Any:
+        """Write text file relative to session's cwd."""
+        from pathlib import Path
 
-        raise RequestError.method_not_found("fs/write_text_file")
+        from acp import RequestError
+        from acp.schema import WriteTextFileResponse
+
+        # Validate required parameters
+        if not path:
+            raise RequestError.invalid_params("Missing required parameter: path")
+        if not session_id:
+            raise RequestError.invalid_params("Missing required parameter: session_id")
+
+        # Get session cwd
+        cwd = self._sessions.get(session_id, os.getcwd())
+
+        # Resolve path relative to cwd
+        full_path = Path(cwd) / path
+        log.info(f"📝 Writing file: {full_path}")
+
+        try:
+            # Create parent directories if needed
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write file
+            full_path.write_text(content, encoding="utf-8")
+
+            return WriteTextFileResponse()
+        except Exception as e:
+            log.error(f"Failed to write file {full_path}: {e}")
+            raise RequestError.internal_error(f"Failed to write file: {e}")
 
     async def read_text_file(
         self,
-        path: str,
-        session_id: str,
+        path: str = "",
+        session_id: str = "",
         limit: int | None = None,
         line: int | None = None,
         **kwargs: Any,
     ) -> Any:
+        """Read text file relative to session's cwd."""
+        from pathlib import Path
+
         from acp import RequestError
+        from acp.schema import ReadTextFileResponse
 
-        raise RequestError.method_not_found("fs/read_text_file")
+        # Validate required parameters
+        if not path:
+            raise RequestError.invalid_params("Missing required parameter: path")
+        if not session_id:
+            raise RequestError.invalid_params("Missing required parameter: session_id")
 
-    # Terminal methods - raise not found for now
+        # Get session cwd
+        cwd = self._sessions.get(session_id, os.getcwd())
+
+        # Resolve path relative to cwd
+        full_path = Path(cwd) / path
+        log.info(f"📖 Reading file: {full_path}")
+
+        try:
+            # Check if file exists and is actually a file
+            if not full_path.exists():
+                log.warning(f"File not found: {full_path}")
+                raise RequestError.invalid_params(f"File not found: {path}")
+            if not full_path.is_file():
+                log.warning(f"Path is not a file: {full_path}")
+                raise RequestError.invalid_params(f"Path is not a file: {path}")
+
+            content = full_path.read_text(encoding="utf-8")
+
+            # Handle line parameter (1-based line number to start from)
+            if line is not None:
+                lines = content.splitlines(keepends=True)
+                if line > 0 and line <= len(lines):
+                    content = "".join(lines[line - 1 :])
+
+            # Handle limit parameter (max number of lines)
+            if limit is not None and limit > 0:
+                lines = content.splitlines(keepends=True)
+                content = "".join(lines[:limit])
+
+            return ReadTextFileResponse(content=content)
+        except RequestError:
+            raise
+        except Exception as e:
+            log.error(f"Failed to read file {full_path}: {e}")
+            raise RequestError.internal_error(f"Failed to read file: {e}")
+
+    # Terminal methods - implement with cwd support
     async def create_terminal(
         self,
-        command: str,
-        session_id: str,
+        command: str = "",
+        session_id: str = "",
         args: list[str] | None = None,
         cwd: str | None = None,
         env: list[Any] | None = None,
         output_byte_limit: int | None = None,
         **kwargs: Any,
     ) -> CreateTerminalResponse:
-        from acp import RequestError
+        """Create a terminal and execute command with session's cwd."""
+        import uuid
 
-        raise RequestError.method_not_found("terminal/create")
+        from acp import RequestError
+        from acp.schema import CreateTerminalResponse
+
+        # Validate required parameters
+        if not command:
+            raise RequestError.invalid_params("Missing required parameter: command")
+        if not session_id:
+            raise RequestError.invalid_params("Missing required parameter: session_id")
+
+        # Get session cwd or use provided cwd
+        session_cwd = self._sessions.get(session_id, os.getcwd())
+        working_dir = cwd or session_cwd
+
+        # Build command line
+        cmd_parts = [command]
+        if args:
+            cmd_parts.extend(args)
+
+        log.info(f"🖥️  Creating terminal in {working_dir}: {' '.join(cmd_parts)}")
+
+        try:
+            # Start process
+            process = await asyncio.create_subprocess_exec(
+                *cmd_parts,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,  # Merge stderr into stdout
+                cwd=working_dir,
+            )
+
+            # Generate terminal ID
+            terminal_id = f"term_{uuid.uuid4().hex[:8]}"
+
+            # Store process
+            self._terminals[terminal_id] = process
+
+            return CreateTerminalResponse(terminal_id=terminal_id)
+        except Exception as e:
+            from acp import RequestError
+
+            log.error(f"Failed to create terminal: {e}")
+            raise RequestError.internal_error(f"Failed to create terminal: {e}")
 
     async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        """Get output from terminal."""
         from acp import RequestError
+        from acp.schema import TerminalExitStatus, TerminalOutputResponse
 
-        raise RequestError.method_not_found("terminal/output")
+        process = self._terminals.get(terminal_id)
+        if not process:
+            raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
 
-    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
-        from acp import RequestError
+        try:
+            # Read available output (non-blocking)
+            output = ""
+            if process.stdout:
+                try:
+                    # Try to read with timeout
+                    data = await asyncio.wait_for(process.stdout.read(8192), timeout=0.1)
+                    output = data.decode("utf-8", errors="replace")
+                except asyncio.TimeoutError:
+                    pass
 
-        raise RequestError.method_not_found("terminal/release")
+            # Check if process has exited
+            exit_status = None
+            if process.returncode is not None:
+                exit_status = TerminalExitStatus(code=process.returncode)
+
+            return TerminalOutputResponse(output=output, exit_status=exit_status, truncated=False)
+        except RequestError:
+            raise
+        except Exception as e:
+            log.error(f"Failed to get terminal output: {e}")
+            raise RequestError.internal_error(f"Failed to get terminal output: {e}")
 
     async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        """Wait for terminal to exit."""
         from acp import RequestError
+        from acp.schema import TerminalExitStatus
 
-        raise RequestError.method_not_found("terminal/wait_for_exit")
+        process = self._terminals.get(terminal_id)
+        if not process:
+            raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
+
+        try:
+            # Wait for process to finish
+            await process.wait()
+            return TerminalExitStatus(code=process.returncode or 0)
+        except Exception as e:
+            log.error(f"Failed to wait for terminal: {e}")
+            raise RequestError.internal_error(f"Failed to wait for terminal: {e}")
+
+    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        """Release terminal resources."""
+        if terminal_id in self._terminals:
+            process = self._terminals[terminal_id]
+
+            # If still running, terminate it
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+
+            del self._terminals[terminal_id]
+            log.info(f"Released terminal {terminal_id}")
+
+        return {}
 
     async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        """Kill a running terminal."""
         from acp import RequestError
 
-        raise RequestError.method_not_found("terminal/kill")
+        process = self._terminals.get(terminal_id)
+        if not process:
+            raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
+
+        try:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+                log.info(f"Killed terminal {terminal_id}")
+
+            return {}
+        except Exception as e:
+            log.error(f"Failed to kill terminal: {e}")
+            raise RequestError.internal_error(f"Failed to kill terminal: {e}")
 
     def on_connect(self, conn: Any) -> None:
         """Called when the connection is established."""
@@ -445,6 +651,10 @@ class AsyncChainResponse:
         log.warning(f"Created new session ID: {conv._session_id}")
         log.warning(f"Session CWD: {conv._cwd}")
 
+        # Register session cwd with client handler
+        if conv._client and conv._session_id:
+            conv._client.register_session(conv._session_id, conv._cwd)
+
         # Store in session storage for reuse
         storage = get_session_storage()
         if conv._session_id:
@@ -459,6 +669,11 @@ class AsyncChainResponse:
             conv._session_loaded = True
             log.warning("✅ SUCCESS with session/load!")
             log.warning(f"Load response: {session}")
+
+            # Register session cwd with client handler
+            if conv._client and conv._session_id:
+                conv._client.register_session(conv._session_id, conv._cwd)
+
             # Session ID stays the same after load
         except Exception as e2:
             log.warning(f"❌ session/load failed: {type(e2).__name__}: {e2}")
@@ -472,6 +687,10 @@ class AsyncChainResponse:
         # and created a new session instead
         log.warning(f"Created new session ID: {conv._session_id}")
         log.warning(f"Session CWD: {conv._cwd}")
+
+        # Register session cwd with client handler
+        if conv._client and conv._session_id:
+            conv._client.register_session(conv._session_id, conv._cwd)
 
         # Update session storage with new session ID
         storage = get_session_storage()
@@ -504,6 +723,10 @@ class AsyncChainResponse:
             if new_session_id and new_session_id != conv._session_id:
                 log.info(f"   Forked session ID: {conv._session_id} → {new_session_id}")
                 conv._session_id = new_session_id
+
+            # Register session cwd with client handler
+            if conv._client and conv._session_id:
+                conv._client.register_session(conv._session_id, conv._cwd)
 
             # Update session storage with (possibly new) forked session ID
             storage = get_session_storage()
