@@ -22,7 +22,7 @@ import os
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import singledispatch
-from typing import Any, TypedDict, Union
+from typing import TYPE_CHECKING, Any, TypedDict, Union, cast
 
 # JSON type for proper typing of JSON values
 JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
@@ -73,36 +73,36 @@ log = logging.getLogger(__name__)
 
 # Singledispatch handlers for session updates
 @singledispatch
-async def _handle_update(update: object, client: "ACPClientHandler") -> None:
+async def _handle_update(update: object, client: object) -> None:
     """Default handler for unknown update types."""
     log.warning(f"⚠️  Unhandled update type: {type(update).__name__} - {update}")
 
 
 @_handle_update.register
-async def _handle_user_message(update: UserMessageChunk, client: "ACPClientHandler") -> None:
+async def _handle_user_message(update: UserMessageChunk, client: object) -> None:
     """Handle user message chunks (debugging only)."""
     log.warning(f"⚠️  RECEIVED UserMessageChunk (should NOT queue this): {update.content}")
 
 
 @_handle_update.register
-async def _handle_agent_message(update: AgentMessageChunk, client: "ACPClientHandler") -> None:
+async def _handle_agent_message(update: AgentMessageChunk, client: object) -> None:
     """Handle agent message chunks - stream text."""
     content = update.content
     if isinstance(content, TextContentBlock):
-        await client._events.put(MessageChunk(content.text))
+        await cast("ACPClientHandler", client)._events.put(MessageChunk(content.text))
 
 
 @_handle_update.register
-async def _handle_agent_thought(update: AgentThoughtChunk, client: "ACPClientHandler") -> None:
+async def _handle_agent_thought(update: AgentThoughtChunk, client: object) -> None:
     """Handle agent thinking chunks - stream thinking text."""
 
     content = update.content
     if isinstance(content, TextContentBlock):
-        await client._events.put(ThoughtChunk(content.text))
+        await cast("ACPClientHandler", client)._events.put(ThoughtChunk(content.text))
 
 
 @_handle_update.register
-async def _handle_plan_update(update: AgentPlanUpdate, client: "ACPClientHandler") -> None:
+async def _handle_plan_update(update: AgentPlanUpdate, client: object) -> None:
     """Handle agent plan updates - log for now."""
     log.info(f"📋 Plan Update received: {len(update.entries)} entries")
     for entry in update.entries:
@@ -115,16 +115,15 @@ async def _handle_plan_update(update: AgentPlanUpdate, client: "ACPClientHandler
 
 @_handle_update.register(ACPToolCallStart)
 @_handle_update.register(ACPToolCallProgress)
-async def _handle_tool_call(
-    update: ACPToolCallStart | ACPToolCallProgress, client: "ACPClientHandler"
-) -> None:
+async def _handle_tool_call(update: ACPToolCallStart | ACPToolCallProgress, client: object) -> None:
     """Handle tool call start and progress updates."""
+    handler = cast("ACPClientHandler", client)
 
     tool_call_id = update.tool_call_id or ""
     status = update.status or ""
 
     # Create or get tool call
-    if tool_call_id not in client._tool_calls:
+    if tool_call_id not in handler._tool_calls:
         # Extract arguments from raw_input
         arguments: dict[str, JSON] = {}
         if isinstance(update.raw_input, dict):
@@ -154,21 +153,21 @@ async def _handle_tool_call(
             name=tool_name,
             arguments=arguments,
         )
-        client._tool_calls[tool_call_id] = tc
+        handler._tool_calls[tool_call_id] = tc
 
         # Emit ToolCallStart event
-        await client._events.put(
+        await handler._events.put(
             ToolCallStart(id=tool_call_id, name=tool_name, arguments=arguments)
         )
 
     # Emit progress/completion events
     if status == "in_progress":
-        await client._events.put(ToolCallProgress(id=tool_call_id, status=status))
+        await handler._events.put(ToolCallProgress(id=tool_call_id, status=status))
     elif status in ("completed", "failed"):
         output = ""
         if update.raw_output:
             output = str(update.raw_output)
-        await client._events.put(ToolCallComplete(id=tool_call_id, output=output))
+        await handler._events.put(ToolCallComplete(id=tool_call_id, output=output))
 
 
 class CacheDetails(TypedDict, total=False):
