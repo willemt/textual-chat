@@ -61,7 +61,23 @@ class TokenUsage:
     cached_tokens: int = 0
 
 
+@dataclass
+class PermissionRequest:
+    """Request for user permission to execute a tool."""
+
+    request_id: str
+    session_id: str
+    tool_call: dict[str, JSON]  # ToolCallUpdate as dict
+    options: list[dict[str, JSON]]  # List of PermissionOption as dicts
+
+
 # Union type for all possible events
 StreamEvent = (
-    MessageChunk | ThoughtChunk | ToolCallStart | ToolCallProgress | ToolCallComplete | TokenUsage
+    MessageChunk
+    | ThoughtChunk
+    | ToolCallStart
+    | ToolCallProgress
+    | ToolCallComplete
+    | TokenUsage
+    | PermissionRequest
 )

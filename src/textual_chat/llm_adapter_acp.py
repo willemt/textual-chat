@@ -19,9 +19,11 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import singledispatch
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, Union, cast
 
 # JSON type for proper typing of JSON values
@@ -59,6 +61,7 @@ from acp.schema import (
 from .agent_manager import get_agent_manager
 from .events import (
     MessageChunk,
+    PermissionRequest,
     StreamEvent,
     ThoughtChunk,
     ToolCallComplete,
@@ -267,6 +270,9 @@ class ACPClientHandler(Client):
         self._sessions: dict[str, str] = {}  # session_id -> cwd mapping
         self._terminals: dict[str, asyncio.subprocess.Process] = {}  # terminal_id -> process
         self._acp_client_capabilities: set[str] = set()  # tool_call_ids for Read/Write File
+        self._permission_responses: dict[str, asyncio.Future[RequestPermissionResponse]] = (
+            {}
+        )  # request_id -> future
 
     def register_session(self, session_id: str, cwd: str) -> None:
         """Register a session's working directory."""
@@ -280,6 +286,7 @@ class ACPClientHandler(Client):
         self._events = asyncio.Queue()
         self._tool_calls = {}
         self._acp_client_capabilities.clear()
+        self._permission_responses = {}
 
     async def session_update(
         self,
@@ -307,21 +314,53 @@ class ACPClientHandler(Client):
         tool_call: ToolCallUpdate,
         **kwargs: JSON,
     ) -> RequestPermissionResponse:
-        """Handle permission requests - auto-approve for now."""
-        # Auto-approve by selecting the first option if available
-        option_id = options[0].option_id if options else "approved"
-        return RequestPermissionResponse(
-            outcome=AllowedOutcome(option_id=option_id, outcome="selected")
+        """Handle permission requests - emit event and wait for user response."""
+        # Generate unique request ID
+        request_id = str(uuid.uuid4())
+
+        # Create a future for the response
+        future: asyncio.Future[RequestPermissionResponse] = asyncio.Future()
+        self._permission_responses[request_id] = future
+
+        # Convert options and tool_call to dicts for the event
+        options_dicts = [
+            {
+                "option_id": opt.option_id,
+                "name": opt.name,
+                "kind": opt.kind,
+            }
+            for opt in options
+        ]
+
+        tool_call_dict = {
+            "tool_call_id": tool_call.tool_call_id,
+            "title": tool_call.title,
+            "raw_input": tool_call.raw_input,
+            "status": tool_call.status,
+        }
+
+        # Emit permission request event
+        await self._events.put(
+            PermissionRequest(
+                request_id=request_id,
+                session_id=session_id,
+                tool_call=tool_call_dict,
+                options=options_dicts,
+            )
         )
+
+        # Wait for user to respond
+        log.info(f"⏳ Waiting for permission response for request {request_id}")
+        response = await future
+        log.info(f"✅ Received permission response for request {request_id}: {response}")
+
+        return response
 
     # File system methods - implement with cwd support
     async def write_text_file(
         self, content: str = "", path: str = "", session_id: str = "", **kwargs: JSON
     ) -> WriteTextFileResponse:
         """Write text file relative to session's cwd."""
-        import uuid
-        from pathlib import Path
-
         from acp import RequestError
         from acp.schema import WriteTextFileResponse
 
@@ -369,9 +408,6 @@ class ACPClientHandler(Client):
         **kwargs: JSON,
     ) -> ReadTextFileResponse:
         """Read text file relative to session's cwd."""
-        import uuid
-        from pathlib import Path
-
         from acp import RequestError
         from acp.schema import ReadTextFileResponse
 
@@ -442,8 +478,6 @@ class ACPClientHandler(Client):
         **kwargs: JSON,
     ) -> CreateTerminalResponse:
         """Create a terminal and execute command with session's cwd."""
-        import uuid
-
         from acp import RequestError
         from acp.schema import CreateTerminalResponse
 
@@ -598,6 +632,27 @@ class ACPClientHandler(Client):
         """Signal that streaming is complete."""
         self._events.put_nowait(None)
 
+    def respond_to_permission(self, request_id: str, option_id: str) -> None:
+        """Respond to a permission request.
+
+        Args:
+            request_id: The ID of the permission request
+            option_id: The option_id to select from the permission options
+        """
+        if request_id not in self._permission_responses:
+            log.warning(f"⚠️ Unknown permission request ID: {request_id}")
+            return
+
+        future = self._permission_responses[request_id]
+        if not future.done():
+            response = RequestPermissionResponse(
+                outcome=AllowedOutcome(option_id=option_id, outcome="selected")
+            )
+            future.set_result(response)
+            log.info(f"✅ Set permission response for {request_id}: {option_id}")
+        else:
+            log.warning(f"⚠️ Permission request {request_id} already responded to")
+
 
 class AsyncConversation:
     """Manages conversation with an ACP agent."""
@@ -685,6 +740,19 @@ class AsyncConversation:
         log.info(f"Closing conversation for session: {self._session_id}")
         # Session remains alive in the agent for potential forking
         self._session_id = None
+
+    def respond_to_permission(self, request_id: str, option_id: str) -> None:
+        """Respond to a permission request.
+
+        Args:
+            request_id: The ID of the permission request (from PermissionRequest event)
+            option_id: The option_id to select (from the options in PermissionRequest event)
+        """
+        if self._client is None:
+            log.warning("⚠️ Cannot respond to permission - no client available")
+            return
+
+        self._client.respond_to_permission(request_id, option_id)
 
 
 async def create_connection(conv: AsyncConversation) -> None:
