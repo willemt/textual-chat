@@ -104,7 +104,7 @@ class PlanPane(VerticalScroll):
         try:
             log.info(f"📋 PlanPane.update_plan called with {len(entries)} entries")
             log.info(f"📋 Entries received: {entries}")
-            
+
             list_view = self.query_one("#plan-list", ListView)
             list_view.clear()
             log.info(f"📋 Cleared list_view")
@@ -112,7 +112,7 @@ class PlanPane(VerticalScroll):
             for i, entry in enumerate(entries):
                 status = entry.get("status", "pending")
                 content = entry.get("content", "")
-                
+
                 log.info(f"📋 Processing entry {i}: status='{status}', content='{content}'")
 
                 # Create status icon
@@ -133,7 +133,7 @@ class PlanPane(VerticalScroll):
 
                 await list_view.append(item)
                 log.info(f"📋 Appended item {i} to list_view")
-            
+
             log.info(f"📋 PlanPane.update_plan completed, list_view has {len(list_view.children)} items")
 
         except Exception as e:
