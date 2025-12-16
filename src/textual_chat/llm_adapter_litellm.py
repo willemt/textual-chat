@@ -20,10 +20,16 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
-from typing import Any, TypedDict, get_type_hints
+from typing import TYPE_CHECKING, TypedDict, Union, get_type_hints
 
 import litellm
 from litellm import acompletion
+
+# JSON type for LLM messages and tool arguments
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
+
+if TYPE_CHECKING:
+    from .events import StreamEvent
 
 # Suppress litellm's noisy logging
 litellm.suppress_debug_info = True
@@ -45,7 +51,7 @@ class CacheDetails(TypedDict, total=False):
     cache_creation_input_tokens: int  # Anthropic format
 
 
-def _extract_cache_details(usage: Any) -> CacheDetails:
+def _extract_cache_details(usage: object) -> CacheDetails:
     """Extract cache-related details from usage object."""
     details: CacheDetails = {}
     # OpenAI format
@@ -81,7 +87,7 @@ class ToolCall:
 
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: dict[str, JSON]
 
 
 @dataclass
@@ -92,7 +98,7 @@ class ToolResult:
     output: str
 
 
-def _python_type_to_json(py_type: type | str) -> dict[str, Any]:
+def _python_type_to_json(py_type: type | str) -> dict[str, JSON]:
     """Convert Python type to JSON schema."""
     # Handle string annotations (forward references)
     if isinstance(py_type, str):
@@ -109,7 +115,7 @@ def _python_type_to_json(py_type: type | str) -> dict[str, Any]:
             return {"type": "object"}
         return {"type": "string"}
 
-    mapping = {
+    mapping: dict[type, dict[str, JSON]] = {
         str: {"type": "string"},
         int: {"type": "integer"},
         float: {"type": "number"},
@@ -120,7 +126,7 @@ def _python_type_to_json(py_type: type | str) -> dict[str, Any]:
     return mapping.get(py_type, {"type": "string"})
 
 
-def _func_to_tool_schema(func: Callable) -> dict[str, Any]:
+def _func_to_tool_schema(func: Callable) -> dict[str, JSON]:
     """Convert a function to OpenAI tool schema."""
     # Try to get type hints, but fall back to raw annotations if evaluation fails
     # (e.g., when annotations reference types not in scope like 'App')
@@ -148,8 +154,8 @@ def _func_to_tool_schema(func: Callable) -> dict[str, Any]:
             "description": (func.__doc__ or "").strip() or f"Call {func.__name__}",
             "parameters": {
                 "type": "object",
-                "properties": properties,
-                "required": required,
+                "properties": properties,  # type: ignore[dict-item]
+                "required": required,  # type: ignore[dict-item]
             },
         },
     }
@@ -233,7 +239,7 @@ class AsyncConversation:
 
     def __init__(self, model: AsyncModel):
         self.model = model
-        self._messages: list[dict[str, Any]] = []
+        self._messages: list[dict[str, JSON]] = []
 
     def chain(
         self,
@@ -297,7 +303,7 @@ class AsyncChainResponse:
         self._current_response: AsyncResponse | None = None
         self._iterated = False
 
-    def _build_kwargs(self) -> dict[str, Any]:
+    def _build_kwargs(self) -> dict[str, JSON]:
         """Build kwargs for litellm acompletion."""
         model = self._conversation.model
         is_claude = model.is_claude
@@ -322,9 +328,9 @@ class AsyncChainResponse:
         else:
             messages = list(self._conversation._messages)
 
-        kwargs: dict[str, Any] = {
+        kwargs: dict[str, JSON] = {
             "model": model.model_id,
-            "messages": messages,
+            "messages": messages,  # type: ignore[dict-item]
         }
 
         if model.api_key:
@@ -337,11 +343,11 @@ class AsyncChainResponse:
             # Add cache_control to last tool for Anthropic
             if tools and is_claude and cache:
                 tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
-            kwargs["tools"] = tools
+            kwargs["tools"] = tools  # type: ignore[assignment]
 
         return kwargs
 
-    async def __aiter__(self) -> AsyncGenerator[Any, None]:
+    async def __aiter__(self) -> AsyncGenerator[StreamEvent, None]:
         """Iterate over events from the model."""
         from .events import MessageChunk, TokenUsage
 
@@ -450,8 +456,8 @@ class AsyncChainResponse:
             )
 
     async def _handle_tool_calls(
-        self, tool_calls_data: list[dict[str, Any]]
-    ) -> AsyncGenerator[Any, None]:
+        self, tool_calls_data: list[dict[str, JSON]]
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Parse tool calls, execute them, and emit events."""
         from .events import ToolCallComplete, ToolCallStart
 
@@ -461,9 +467,9 @@ class AsyncChainResponse:
             if not tc_data["name"]:
                 continue
             tool_call = ToolCall(
-                id=tc_data["id"],
-                name=tc_data["name"],
-                arguments=(json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}),
+                id=str(tc_data["id"]),
+                name=str(tc_data["name"]),
+                arguments=(json.loads(str(tc_data["arguments"])) if tc_data["arguments"] else {}),
             )
             tool_calls.append(tool_call)
 

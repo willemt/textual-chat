@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Union
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from pydantic import AnyUrl
+
+# JSON type for MCP schemas and arguments
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 
 @dataclass
@@ -18,9 +22,9 @@ class MCPTool:
 
     name: str
     description: str
-    input_schema: dict[str, Any]
+    input_schema: dict[str, JSON]
 
-    def to_openai_tool(self) -> dict[str, Any]:
+    def to_openai_tool(self) -> dict[str, JSON]:
         """Convert to OpenAI function calling format."""
         return {
             "type": "function",
@@ -48,7 +52,7 @@ class MCPClient:
     def __init__(self) -> None:
         self._sessions: dict[str, ClientSession] = {}
         self._tools: dict[str, tuple[str, MCPTool]] = {}  # tool_name -> (server_name, tool)
-        self._cleanup_tasks: list[Any] = []
+        self._cleanup_tasks: list[asyncio.Task[None]] = []
 
     @asynccontextmanager
     async def connect_stdio(
@@ -109,15 +113,15 @@ class MCPClient:
         """Get all available tools from connected servers."""
         return [tool for _, tool in self._tools.values()]
 
-    def get_openai_tools(self) -> list[dict[str, Any]]:
+    def get_openai_tools(self) -> list[dict[str, JSON]]:
         """Get tools in OpenAI function calling format."""
         return [tool.to_openai_tool() for tool in self.get_tools()]
 
     async def call_tool(
         self,
         name: str,
-        arguments: dict[str, Any],
-    ) -> Any:
+        arguments: dict[str, JSON],
+    ) -> JSON:
         """Call a tool by name.
 
         Args:
@@ -134,7 +138,16 @@ class MCPClient:
         session = self._sessions[server_name]
 
         result = await session.call_tool(name, arguments)
-        return result
+        # Convert CallToolResult to JSON-compatible format
+        if hasattr(result, "content"):
+            content = result.content
+            if isinstance(content, list):
+                # Extract text from content blocks
+                texts = [c.text for c in content if hasattr(c, "text")]
+                if texts:
+                    return "\n".join(texts)
+            return str(content)
+        return str(result)
 
     async def list_resources(self, server_name: str | None = None) -> list[MCPResource]:
         """List resources from MCP servers.

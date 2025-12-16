@@ -12,10 +12,14 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from acp import PROTOCOL_VERSION, connect_to_agent
-from acp.schema import ClientCapabilities, FileSystemCapability, Implementation
+from acp.client.connection import ClientSideConnection
+from acp.schema import ClientCapabilities, FileSystemCapability, Implementation, InitializeResponse
+
+if TYPE_CHECKING:
+    from .llm_adapter_acp import ACPClientHandler
 
 log = logging.getLogger(__name__)
 
@@ -25,14 +29,14 @@ class SharedAgentConnection:
 
     def __init__(self, agent_command: str):
         self.agent_command = agent_command
-        self._conn: Any = None
+        self._conn: ClientSideConnection | None = None
         self._proc: aio_subprocess.Process | None = None
-        self._client: Any = None
-        self.init_response: Any = None
+        self._client: ACPClientHandler | None = None
+        self.init_response: InitializeResponse | None = None
         self.agent_name: str | None = None
         self._lock = asyncio.Lock()
 
-    async def ensure_connected(self) -> Any:
+    async def ensure_connected(self) -> ClientSideConnection:
         """Ensure connection is established and return the connection object."""
         async with self._lock:
             if self._conn is not None:
@@ -105,25 +109,22 @@ class SharedAgentConnection:
             # Check if loadSession is supported
             if hasattr(self.init_response, "agent_capabilities"):
                 agent_caps = self.init_response.agent_capabilities
-                if hasattr(agent_caps, "load_session"):
+                if agent_caps and hasattr(agent_caps, "load_session"):
                     log.info(f"   ✅ loadSession capability: {agent_caps.load_session}")
                 else:
                     log.info("   ❌ loadSession capability: not present")
 
             # Extract agent name
             if hasattr(self.init_response, "agent_info"):
-                if (
-                    hasattr(self.init_response.agent_info, "title")
-                    and self.init_response.agent_info.title
-                ):
-                    self.agent_name = self.init_response.agent_info.title
-                elif (
-                    hasattr(self.init_response.agent_info, "name")
-                    and self.init_response.agent_info.name
-                ):
-                    self.agent_name = self.init_response.agent_info.name
+                agent_info = self.init_response.agent_info
+                if agent_info:
+                    if hasattr(agent_info, "title") and agent_info.title:
+                        self.agent_name = agent_info.title
+                    elif hasattr(agent_info, "name") and agent_info.name:
+                        self.agent_name = agent_info.name
 
             log.info(f"Agent connected: {self.agent_name}")
+            assert self._conn is not None, "Connection must be established"
             return self._conn
 
     async def _log_stderr(self) -> None:

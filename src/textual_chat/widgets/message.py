@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Union
 
 from textual.app import ComposeResult
 from textual.containers import ScrollableContainer, Vertical
@@ -12,13 +12,16 @@ from textual.widget import Widget
 from textual.widgets import Markdown, Static
 from textual_golden import Golden
 
+# JSON type for tool arguments
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
+
 
 @dataclass
 class ToolUse:
     """Represents a tool use/call."""
 
     name: str
-    args: dict[str, Any]
+    args: dict[str, JSON]
 
     def __str__(self) -> str:
         if not self.args:
@@ -118,7 +121,7 @@ class MessageWidget(Widget):
         self.border_title = title or role.title()
         self._tool_widgets: dict[str, ToolUseWidget] = {}  # tool_call_id -> widget
         self._current_markdown: Markdown | None = None
-        self._stream: Any = None  # Markdown.Stream type not in public API
+        self._stream: object | None = None  # Markdown.Stream type not in public API
         self._after_tooluse: bool = False  # Track if next markdown should have margin-top
 
     def compose(self) -> ComposeResult:
@@ -157,7 +160,7 @@ class MessageWidget(Widget):
         """Replace all content with new markdown."""
         # Stop any active stream first
         if self._stream is not None:
-            await self._stream.stop()
+            await self._stream.stop()  # type: ignore[attr-defined]
             self._stream = None
 
         self._loading = False
@@ -174,7 +177,7 @@ class MessageWidget(Widget):
         self._current_markdown = md
         self.call_after_refresh(self._scroll_parent)
 
-    def get_markdown_stream(self) -> Any:
+    def get_markdown_stream(self) -> object:
         """Get a streaming interface for efficient markdown updates (returns Markdown.Stream)."""
         container = self._get_content_container()
         loading = self._get_loading_indicator()
@@ -189,7 +192,7 @@ class MessageWidget(Widget):
         self.call_after_refresh(self._scroll_parent)
         return self._stream
 
-    async def ensure_stream(self) -> Any:
+    async def ensure_stream(self) -> object:
         """Get current stream, or create a new one if needed (returns Markdown.Stream)."""
         if self._stream is None:
             # Add blank line separator after tools, before new text
@@ -209,7 +212,7 @@ class MessageWidget(Widget):
         """Add a tool use widget (shows unfilled circle)."""
         # If we were streaming, stop it properly before discarding
         if self._stream is not None:
-            await self._stream.stop()
+            await self._stream.stop()  # type: ignore[attr-defined]
             self._stream = None
 
         # Text before tools is now "done"
@@ -258,7 +261,7 @@ class MessageWidget(Widget):
         """Show error message in red."""
         # Stop any active stream first
         if self._stream is not None:
-            await self._stream.stop()
+            await self._stream.stop()  # type: ignore[attr-defined]
             self._stream = None
 
         self._loading = False

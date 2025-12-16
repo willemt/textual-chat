@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -109,7 +108,7 @@ class AgentSelectModal(ModalScreen[str | None]):
         """Handle selection from the option list."""
         self.dismiss(event.option.id)
 
-    def on_input_submitted(self, event: Any) -> None:
+    def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle custom agent input submission."""
         custom_input = self.query_one("#custom-agent-input", Input)
         custom_agent = custom_input.value.strip()

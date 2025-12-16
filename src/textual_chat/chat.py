@@ -45,9 +45,12 @@ if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
 
 import types
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Literal, Union
 
 from textual.app import ComposeResult
+
+# JSON type for MCP and LLM data
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 from textual.binding import Binding
 from textual.containers import ScrollableContainer, Vertical
 from textual.css.query import NoMatches
@@ -114,41 +117,41 @@ class _ChatInput(TextArea):
         """Set placeholder after mount."""
         self.placeholder = self._placeholder
 
-    async def _on_key(self, event: Any) -> None:
+    async def _on_key(self, event: object) -> None:
         """Handle key presses."""
         # Shift+Enter (comes through as ctrl+j) - insert newline
-        if event.key == "ctrl+j":
+        if event.key == "ctrl+j":  # type: ignore[attr-defined]
             self.insert("\n")
-            event.prevent_default()
-            event.stop()
+            event.prevent_default()  # type: ignore[attr-defined]
+            event.stop()  # type: ignore[attr-defined]
             return
 
         # Enter - submit message
-        if event.key in ("enter", "ctrl+m"):
+        if event.key in ("enter", "ctrl+m"):  # type: ignore[attr-defined]
             content = self.text.strip()
             if content:
                 self.post_message(self.Submitted(content))
                 self.clear()
-            event.prevent_default()
-            event.stop()
+            event.prevent_default()  # type: ignore[attr-defined]
+            event.stop()  # type: ignore[attr-defined]
             return
 
         # Page Up/Down - scroll chat messages
-        if event.key in ("pageup", "pagedown"):
+        if event.key in ("pageup", "pagedown"):  # type: ignore[attr-defined]
             try:
                 container = self.app.query_one("#chat-messages")
-                if event.key == "pageup":
+                if event.key == "pageup":  # type: ignore[attr-defined]
                     container.scroll_page_up()
                 else:
                     container.scroll_page_down()
-                event.prevent_default()
-                event.stop()
+                event.prevent_default()  # type: ignore[attr-defined]
+                event.stop()  # type: ignore[attr-defined]
                 return
             except NoMatches:
                 pass
 
         # Let TextArea handle everything else
-        await super()._on_key(event)
+        await super()._on_key(event)  # type: ignore[arg-type]
 
 
 class Chat(Widget):
@@ -301,10 +304,12 @@ class Chat(Widget):
         self,
         model: str | None = None,
         *,
-        adapter: Literal["litellm", "acp"] | Any = "litellm",
+        adapter: Literal["litellm", "acp"] | str = "litellm",
         system: str | None = None,
         placeholder: str = "Message...",
-        tools: list[Any] | dict[str, Callable] | None = None,
+        tools: (
+            list[object] | dict[str, Callable] | None
+        ) = None,  # Can be Callable, DataTable, or MCP config
         api_key: str | None = None,
         api_base: str | None = None,
         temperature: float | None = None,
@@ -319,7 +324,7 @@ class Chat(Widget):
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
-        **llm_kwargs: Any,
+        **llm_kwargs: JSON,
     ) -> None:
         """Create a chat widget.
 
@@ -387,9 +392,9 @@ class Chat(Widget):
 
         # Tool state
         self._tools: dict[str, Callable] = {}  # Local tools
-        self._mcp_servers: list[Any] = []
-        self._mcp_clients: list[Any] = []
-        self._mcp_tools: dict[str, tuple[Any, str]] = {}  # MCP tool_name -> (client, tool_name)
+        self._mcp_servers: list[dict[str, str]] = []  # Server configurations
+        self._mcp_clients: list[object] = []
+        self._mcp_tools: dict[str, tuple[object, str]] = {}  # MCP tool_name -> (client, tool_name)
 
         # Response state
         self._is_responding = False
@@ -417,8 +422,9 @@ class Chat(Widget):
                         # It's a (DataTable, name) tuple
                         self._register_datatable(item[0], item[1])
                     else:
-                        # Assume it's an MCP server
-                        self._mcp_servers.append(item)
+                        # Assume it's an MCP server config (dict)
+                        if isinstance(item, dict):
+                            self._mcp_servers.append(item)
 
     def _get_assistant_title(self) -> str | None:
         """Get the effective assistant title for display.
@@ -697,11 +703,11 @@ class Chat(Widget):
         except Exception as e:
             log.debug(f"Introspection failed: {e}")
 
-    def _make_mcp_wrapper(self, client: Any, name: str, description: str | None) -> Callable:
+    def _make_mcp_wrapper(self, client: object, name: str, description: str | None) -> Callable:
         """Create an MCP tool wrapper function with proper closure capture."""
 
-        async def wrapper(**kwargs: Any) -> str:
-            result = await client.call_tool(name, kwargs)
+        async def wrapper(**kwargs: JSON) -> str:
+            result = await client.call_tool(name, kwargs)  # type: ignore[attr-defined]
             if hasattr(result, "content"):
                 if isinstance(result.content, list):
                     texts = [c.text for c in result.content if hasattr(c, "text")]
@@ -833,25 +839,27 @@ class Chat(Widget):
         else:
             prev_session_data = self._session_storage.get_session(self._model.model_id)
             log.warning(f"Previous session data (legacy): {prev_session_data}")
-            if prev_session_data:
+            if prev_session_data and isinstance(prev_session_data, dict):
                 # Restore session ID
-                session_id = prev_session_data.get("session_id")
+                session_id = str(prev_session_data.get("session_id", ""))
                 log.warning(f"Found session ID in storage: {session_id}")
 
                 # Restore message history to UI
                 messages = prev_session_data.get("messages", [])
-                for msg in messages:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    title = None
-                    if role == "assistant":
-                        title = self._get_assistant_title()
-                    self._add_message(role, content, title=title)
-                    self._message_history.append({"role": role, "content": content})
+                if isinstance(messages, list):
+                    for msg in messages:
+                        if isinstance(msg, dict):
+                            role = str(msg.get("role", "user"))
+                            content = str(msg.get("content", ""))
+                            title = None
+                            if role == "assistant":
+                                title = self._get_assistant_title()
+                            self._add_message(role, content, title=title)
+                            self._message_history.append({"role": role, "content": content})
 
-                # Show confirmation
-                if messages:
-                    self._set_status(f"Resumed session with {len(messages)} messages")
+                    # Show confirmation
+                    if messages:
+                        self._set_status(f"Resumed session with {len(messages)} messages")
 
     def _init_session(self) -> None:
         # Start fresh - clear the stored session
@@ -984,7 +992,7 @@ class Chat(Widget):
                         # Handle different event types
                         if isinstance(event, MessageChunk):
                             stream = await assistant_widget.ensure_stream()
-                            await stream.write(event.text)
+                            await stream.write(event.text)  # type: ignore[attr-defined]
                             full_text_container["text"] += event.text
 
                         elif isinstance(event, ThoughtChunk):
@@ -1017,7 +1025,7 @@ class Chat(Widget):
 
                     # Close the stream and mark complete
                     if assistant_widget._stream:
-                        await assistant_widget._stream.stop()
+                        await assistant_widget._stream.stop()  # type: ignore[attr-defined]
                     assistant_widget.mark_complete()
 
                     # Scroll to bottom

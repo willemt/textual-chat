@@ -22,10 +22,16 @@ import os
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import singledispatch
-from typing import Any, TypedDict
+from typing import Any, TypedDict, Union
+
+# JSON type for proper typing of JSON values
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 from acp import Client, text_block
+from acp.client.connection import ClientSideConnection
+from acp.interfaces import Agent
 from acp.schema import (
+    InitializeResponse,
     AgentMessageChunk,
     AgentPlanUpdate,
     AgentThoughtChunk,
@@ -33,17 +39,32 @@ from acp.schema import (
     AvailableCommandsUpdate,
     CreateTerminalResponse,
     CurrentModeUpdate,
+    EnvVariable,
+    KillTerminalCommandResponse,
     PermissionOption,
+    ReadTextFileResponse,
+    ReleaseTerminalResponse,
     RequestPermissionResponse,
+    TerminalExitStatus,
+    TerminalOutputResponse,
     TextContentBlock,
     ToolCallProgress as ACPToolCallProgress,
     ToolCallStart as ACPToolCallStart,
     ToolCallUpdate,
     UserMessageChunk,
+    WaitForTerminalExitResponse,
+    WriteTextFileResponse,
 )
 
 from .agent_manager import get_agent_manager
-from .events import MessageChunk, ThoughtChunk, ToolCallComplete, ToolCallStart, ToolCallProgress
+from .events import (
+    MessageChunk,
+    StreamEvent,
+    ThoughtChunk,
+    ToolCallComplete,
+    ToolCallStart,
+    ToolCallProgress,
+)
 from .session_storage import get_session_storage
 
 log = logging.getLogger(__name__)
@@ -52,19 +73,19 @@ log = logging.getLogger(__name__)
 
 # Singledispatch handlers for session updates
 @singledispatch
-async def _handle_update(update: Any, client: Any) -> None:
+async def _handle_update(update: object, client: "ACPClientHandler") -> None:
     """Default handler for unknown update types."""
     log.warning(f"⚠️  Unhandled update type: {type(update).__name__} - {update}")
 
 
 @_handle_update.register
-async def _handle_user_message(update: UserMessageChunk, client: Any) -> None:
+async def _handle_user_message(update: UserMessageChunk, client: "ACPClientHandler") -> None:
     """Handle user message chunks (debugging only)."""
     log.warning(f"⚠️  RECEIVED UserMessageChunk (should NOT queue this): {update.content}")
 
 
 @_handle_update.register
-async def _handle_agent_message(update: AgentMessageChunk, client: Any) -> None:
+async def _handle_agent_message(update: AgentMessageChunk, client: "ACPClientHandler") -> None:
     """Handle agent message chunks - stream text."""
     content = update.content
     if isinstance(content, TextContentBlock):
@@ -72,7 +93,7 @@ async def _handle_agent_message(update: AgentMessageChunk, client: Any) -> None:
 
 
 @_handle_update.register
-async def _handle_agent_thought(update: AgentThoughtChunk, client: Any) -> None:
+async def _handle_agent_thought(update: AgentThoughtChunk, client: "ACPClientHandler") -> None:
     """Handle agent thinking chunks - stream thinking text."""
 
     content = update.content
@@ -81,7 +102,7 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: Any) -> None:
 
 
 @_handle_update.register
-async def _handle_plan_update(update: AgentPlanUpdate, client: Any) -> None:
+async def _handle_plan_update(update: AgentPlanUpdate, client: "ACPClientHandler") -> None:
     """Handle agent plan updates - log for now."""
     log.info(f"📋 Plan Update received: {len(update.entries)} entries")
     for entry in update.entries:
@@ -94,7 +115,9 @@ async def _handle_plan_update(update: AgentPlanUpdate, client: Any) -> None:
 
 @_handle_update.register(ACPToolCallStart)
 @_handle_update.register(ACPToolCallProgress)
-async def _handle_tool_call(update: ACPToolCallStart | ACPToolCallProgress, client: Any) -> None:
+async def _handle_tool_call(
+    update: ACPToolCallStart | ACPToolCallProgress, client: "ACPClientHandler"
+) -> None:
     """Handle tool call start and progress updates."""
 
     tool_call_id = update.tool_call_id or ""
@@ -103,7 +126,7 @@ async def _handle_tool_call(update: ACPToolCallStart | ACPToolCallProgress, clie
     # Create or get tool call
     if tool_call_id not in client._tool_calls:
         # Extract arguments from raw_input
-        arguments: dict[str, Any] = {}
+        arguments: dict[str, JSON] = {}
         if isinstance(update.raw_input, dict):
             arguments = update.raw_input
         elif isinstance(update.raw_input, str):
@@ -169,7 +192,7 @@ class ToolCall:
 
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: dict[str, JSON]
 
 
 @dataclass
@@ -250,7 +273,7 @@ class ACPClientHandler(Client):
             | AvailableCommandsUpdate
             | CurrentModeUpdate
         ),
-        **kwargs: Any,
+        **kwargs: JSON,
     ) -> None:
         """Handle session updates from the agent using singledispatch."""
         log.debug(f"📨 session_update received: {type(update).__name__} {update} {kwargs}")
@@ -261,7 +284,7 @@ class ACPClientHandler(Client):
         options: list[PermissionOption],
         session_id: str,
         tool_call: ToolCallUpdate,
-        **kwargs: Any,
+        **kwargs: JSON,
     ) -> RequestPermissionResponse:
         """Handle permission requests - auto-approve for now."""
         # Auto-approve by selecting the first option if available
@@ -272,8 +295,8 @@ class ACPClientHandler(Client):
 
     # File system methods - implement with cwd support
     async def write_text_file(
-        self, content: str = "", path: str = "", session_id: str = "", **kwargs: Any
-    ) -> Any:
+        self, content: str = "", path: str = "", session_id: str = "", **kwargs: JSON
+    ) -> WriteTextFileResponse:
         """Write text file relative to session's cwd."""
         from pathlib import Path
 
@@ -282,9 +305,9 @@ class ACPClientHandler(Client):
 
         # Validate required parameters
         if not path:
-            raise RequestError.invalid_params("Missing required parameter: path")
+            raise RequestError.invalid_params({"error": "Missing required parameter: path"})
         if not session_id:
-            raise RequestError.invalid_params("Missing required parameter: session_id")
+            raise RequestError.invalid_params({"error": "Missing required parameter: session_id"})
 
         # Get session cwd
         cwd = self._sessions.get(session_id, os.getcwd())
@@ -303,7 +326,7 @@ class ACPClientHandler(Client):
             return WriteTextFileResponse()
         except Exception as e:
             log.error(f"Failed to write file {full_path}: {e}")
-            raise RequestError.internal_error(f"Failed to write file: {e}")
+            raise RequestError.internal_error({"error": f"Failed to write file: {e}"})
 
     async def read_text_file(
         self,
@@ -311,8 +334,8 @@ class ACPClientHandler(Client):
         session_id: str = "",
         limit: int | None = None,
         line: int | None = None,
-        **kwargs: Any,
-    ) -> Any:
+        **kwargs: JSON,
+    ) -> ReadTextFileResponse:
         """Read text file relative to session's cwd."""
         from pathlib import Path
 
@@ -321,9 +344,9 @@ class ACPClientHandler(Client):
 
         # Validate required parameters
         if not path:
-            raise RequestError.invalid_params("Missing required parameter: path")
+            raise RequestError.invalid_params({"error": "Missing required parameter: path"})
         if not session_id:
-            raise RequestError.invalid_params("Missing required parameter: session_id")
+            raise RequestError.invalid_params({"error": "Missing required parameter: session_id"})
 
         # Get session cwd
         cwd = self._sessions.get(session_id, os.getcwd())
@@ -336,10 +359,10 @@ class ACPClientHandler(Client):
             # Check if file exists and is actually a file
             if not full_path.exists():
                 log.warning(f"File not found: {full_path}")
-                raise RequestError.invalid_params(f"File not found: {path}")
+                raise RequestError.invalid_params({"error": f"File not found: {path}"})
             if not full_path.is_file():
                 log.warning(f"Path is not a file: {full_path}")
-                raise RequestError.invalid_params(f"Path is not a file: {path}")
+                raise RequestError.invalid_params({"error": f"Path is not a file: {path}"})
 
             content = full_path.read_text(encoding="utf-8")
 
@@ -359,18 +382,17 @@ class ACPClientHandler(Client):
             raise
         except Exception as e:
             log.error(f"Failed to read file {full_path}: {e}")
-            raise RequestError.internal_error(f"Failed to read file: {e}")
+            raise RequestError.internal_error({"error": f"Failed to read file: {e}"})
 
-    # Terminal methods - implement with cwd support
     async def create_terminal(
         self,
-        command: str = "",
-        session_id: str = "",
+        command: str,
+        session_id: str,
         args: list[str] | None = None,
         cwd: str | None = None,
-        env: list[Any] | None = None,
+        env: list[EnvVariable] | None = None,
         output_byte_limit: int | None = None,
-        **kwargs: Any,
+        **kwargs: JSON,
     ) -> CreateTerminalResponse:
         """Create a terminal and execute command with session's cwd."""
         import uuid
@@ -380,9 +402,9 @@ class ACPClientHandler(Client):
 
         # Validate required parameters
         if not command:
-            raise RequestError.invalid_params("Missing required parameter: command")
+            raise RequestError.invalid_params({"error": "Missing required parameter: command"})
         if not session_id:
-            raise RequestError.invalid_params("Missing required parameter: session_id")
+            raise RequestError.invalid_params({"error": "Missing required parameter: session_id"})
 
         # Get session cwd or use provided cwd
         session_cwd = self._sessions.get(session_id, os.getcwd())
@@ -415,16 +437,18 @@ class ACPClientHandler(Client):
             from acp import RequestError
 
             log.error(f"Failed to create terminal: {e}")
-            raise RequestError.internal_error(f"Failed to create terminal: {e}")
+            raise RequestError.internal_error({"error": f"Failed to create terminal: {e}"})
 
-    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+    async def terminal_output(
+        self, session_id: str, terminal_id: str, **kwargs: JSON
+    ) -> TerminalOutputResponse:
         """Get output from terminal."""
         from acp import RequestError
         from acp.schema import TerminalExitStatus, TerminalOutputResponse
 
         process = self._terminals.get(terminal_id)
         if not process:
-            raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
+            raise RequestError.invalid_params({"error": f"Terminal {terminal_id} not found"})
 
         try:
             # Read available output (non-blocking)
@@ -440,33 +464,36 @@ class ACPClientHandler(Client):
             # Check if process has exited
             exit_status = None
             if process.returncode is not None:
-                exit_status = TerminalExitStatus(code=process.returncode)
+                exit_status = TerminalExitStatus(exit_code=process.returncode)
 
             return TerminalOutputResponse(output=output, exit_status=exit_status, truncated=False)
         except RequestError:
             raise
         except Exception as e:
             log.error(f"Failed to get terminal output: {e}")
-            raise RequestError.internal_error(f"Failed to get terminal output: {e}")
+            raise RequestError.internal_error({"error": f"Failed to get terminal output: {e}"})
 
-    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+    async def wait_for_terminal_exit(
+        self, session_id: str, terminal_id: str, **kwargs: JSON
+    ) -> WaitForTerminalExitResponse:
         """Wait for terminal to exit."""
         from acp import RequestError
-        from acp.schema import TerminalExitStatus
 
         process = self._terminals.get(terminal_id)
         if not process:
-            raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
+            raise RequestError.invalid_params({"error": f"Terminal {terminal_id} not found"})
 
         try:
             # Wait for process to finish
             await process.wait()
-            return TerminalExitStatus(code=process.returncode or 0)
+            return WaitForTerminalExitResponse(exit_code=process.returncode or 0)
         except Exception as e:
             log.error(f"Failed to wait for terminal: {e}")
-            raise RequestError.internal_error(f"Failed to wait for terminal: {e}")
+            raise RequestError.internal_error({"error": f"Failed to wait for terminal: {e}"})
 
-    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+    async def release_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: JSON
+    ) -> ReleaseTerminalResponse | None:
         """Release terminal resources."""
         if terminal_id in self._terminals:
             process = self._terminals[terminal_id]
@@ -483,15 +510,17 @@ class ACPClientHandler(Client):
             del self._terminals[terminal_id]
             log.info(f"Released terminal {terminal_id}")
 
-        return {}
+        return None
 
-    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+    async def kill_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: JSON
+    ) -> KillTerminalCommandResponse | None:
         """Kill a running terminal."""
         from acp import RequestError
 
         process = self._terminals.get(terminal_id)
         if not process:
-            raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
+            raise RequestError.invalid_params({"error": f"Terminal {terminal_id} not found"})
 
         try:
             if process.returncode is None:
@@ -499,22 +528,22 @@ class ACPClientHandler(Client):
                 await process.wait()
                 log.info(f"Killed terminal {terminal_id}")
 
-            return {}
+            return None
         except Exception as e:
             log.error(f"Failed to kill terminal: {e}")
-            raise RequestError.internal_error(f"Failed to kill terminal: {e}")
+            raise RequestError.internal_error({"error": f"Failed to kill terminal: {e}"})
 
-    def on_connect(self, conn: Any) -> None:
+    def on_connect(self, conn: Agent) -> None:
         """Called when the connection is established."""
         pass
 
-    async def ext_method(self, method: str, params: Any) -> Any:
+    async def ext_method(self, method: str, params: dict[str, JSON]) -> dict[str, JSON]:
         """Handle extension methods."""
         from acp import RequestError
 
         raise RequestError.method_not_found(method)
 
-    async def ext_notification(self, method: str, params: Any) -> None:
+    async def ext_notification(self, method: str, params: dict[str, JSON]) -> None:
         """Handle extension notifications."""
         return None
 
@@ -528,11 +557,15 @@ class AsyncConversation:
 
     def __init__(self, model: AsyncModel, cwd: str | None = None) -> None:
         self.model = model
-        self._conn: Any = None  # Shared connection (managed by AgentManager)
+        self._conn: ClientSideConnection | None = (
+            None  # Shared connection (managed by AgentManager)
+        )
         self._client: ACPClientHandler | None = None  # Shared client handler
         self.agent_name: str | None = None  # Agent name from initialization
         self._cwd: str = cwd or os.getcwd()  # Working directory for agent sessions
-        self.init_response: Any = None  # Store initialization response with capabilities
+        self.init_response: InitializeResponse | None = (
+            None  # Store initialization response with capabilities
+        )
         self._session_loaded: bool = False  # Whether session has been loaded/forked
         self._session_capabilities: dict[str, bool] = {}  # Available session methods
 
@@ -645,6 +678,7 @@ class AsyncChainResponse:
 
     async def _create_new_session(self, conv: AsyncConversation) -> None:
         log.warning("========== CREATING NEW SESSION ==========")
+        assert conv._conn is not None, "Connection must be established"
         session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
         conv._session_id = session.session_id
         conv._session_loaded = True  # Mark as loaded so we don't try to restore it
@@ -662,6 +696,8 @@ class AsyncChainResponse:
 
     async def _load_session(self, conv: AsyncConversation) -> None:
         log.warning("🔄 Attempt: Trying session/load...")
+        assert conv._conn is not None, "Connection must be established"
+        assert conv._session_id is not None, "Session ID must exist for load"
         try:
             session = await conv._conn.load_session(
                 cwd=conv._cwd, mcp_servers=[], session_id=conv._session_id
@@ -681,6 +717,7 @@ class AsyncChainResponse:
 
     async def _new_session(self, conv: AsyncConversation) -> None:
         log.warning("🔄 Attempt: Creating new session...")
+        assert conv._conn is not None, "Connection must be established"
         session = await conv._conn.new_session(cwd=conv._cwd, mcp_servers=[])
         conv._session_id = session.session_id
         # Don't set _session_loaded = True here, since we failed to restore
@@ -699,6 +736,7 @@ class AsyncChainResponse:
 
     async def _fork_session(self, conv: AsyncConversation) -> None:
         log.warning("🔄: Trying session/fork via send_request...")
+        assert conv._conn is not None, "Connection must be established"
         try:
             result = await conv._conn._conn.send_request(
                 "session/fork",
@@ -736,7 +774,7 @@ class AsyncChainResponse:
             log.warning(f"❌ session/fork failed: {type(e).__name__}: {e}")
             raise
 
-    async def _ensure_connection(self) -> tuple[Any, str, ACPClientHandler]:
+    async def _ensure_connection(self) -> tuple[ClientSideConnection, str, ACPClientHandler]:
         """Ensure we have a connection and session."""
         conv = self._conversation
 
@@ -769,11 +807,12 @@ class AsyncChainResponse:
             conv._client.reset_for_turn()
 
         # Ensure types are correct for return
+        assert conv._conn is not None
         assert conv._session_id is not None
         assert conv._client is not None
         return conv._conn, conv._session_id, conv._client
 
-    async def __aiter__(self) -> AsyncGenerator[Any, None]:
+    async def __aiter__(self) -> AsyncGenerator[StreamEvent, None]:
         """Iterate over events from the agent."""
         from .events import MessageChunk, StreamEvent
 

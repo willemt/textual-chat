@@ -4,11 +4,14 @@ Provides tools that allow LLMs to query and manipulate Textual DataTable widgets
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Union
 
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
+
+# JSON type for table cell values
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 
 def create_datatable_tools(table: DataTable, name: str = "table") -> dict[str, Callable]:
@@ -30,7 +33,7 @@ def create_datatable_tools(table: DataTable, name: str = "table") -> dict[str, C
         """Get the number of rows in the data table."""
         return table.row_count
 
-    def get_all_data() -> list[dict[str, Any]]:
+    def get_all_data() -> list[dict[str, JSON]]:
         """Get all data from the table as a list of dictionaries."""
         columns = [str(col.label) for col in table.columns.values()]
         rows = []
@@ -42,7 +45,7 @@ def create_datatable_tools(table: DataTable, name: str = "table") -> dict[str, C
             rows.append(row_data)
         return rows
 
-    def get_row(index: int) -> dict[str, Any]:
+    def get_row(index: int) -> dict[str, JSON]:
         """Get a specific row by index (0-based).
 
         Args:

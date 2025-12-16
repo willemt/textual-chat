@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Union
 
 from litellm import acompletion
+
+# JSON type for LLM message content and tool arguments
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 
 @dataclass
@@ -16,7 +19,7 @@ class ToolCall:
 
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: dict[str, JSON]
 
 
 @dataclass
@@ -38,7 +41,7 @@ class LLMClient:
         api_key: str | None = None,
         api_base: str | None = None,
         system_prompt: str | None = None,
-        **kwargs: Any,
+        **kwargs: JSON,
     ) -> None:
         """Initialize the LLM client.
 
@@ -54,9 +57,9 @@ class LLMClient:
         self.api_base = api_base
         self.system_prompt = system_prompt
         self.extra_kwargs = kwargs
-        self._tools: list[dict[str, Any]] = []
+        self._tools: list[dict[str, JSON]] = []
 
-    def set_tools(self, tools: list[dict[str, Any]]) -> None:
+    def set_tools(self, tools: list[dict[str, JSON]]) -> None:
         """Set available tools for the LLM.
 
         Args:
@@ -64,9 +67,9 @@ class LLMClient:
         """
         self._tools = tools
 
-    def _build_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _build_messages(self, messages: list[dict[str, JSON]]) -> list[dict[str, JSON]]:
         """Build the full message list including system prompt."""
-        result = []
+        result: list[dict[str, JSON]] = []
         if self.system_prompt:
             result.append({"role": "system", "content": self.system_prompt})
         result.extend(messages)
@@ -74,7 +77,7 @@ class LLMClient:
 
     async def complete(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, JSON]],
     ) -> LLMResponse:
         """Get a completion from the LLM.
 
@@ -86,9 +89,9 @@ class LLMClient:
         """
         full_messages = self._build_messages(messages)
 
-        kwargs: dict[str, Any] = {
+        kwargs: dict[str, JSON] = {
             "model": self.model,
-            "messages": full_messages,
+            "messages": full_messages,  # type: ignore[dict-item]
             **self.extra_kwargs,
         }
 
@@ -97,7 +100,7 @@ class LLMClient:
         if self.api_base:
             kwargs["api_base"] = self.api_base
         if self._tools:
-            kwargs["tools"] = self._tools
+            kwargs["tools"] = self._tools  # type: ignore[assignment]
 
         response = await acompletion(**kwargs)
         choice = response.choices[0]
@@ -122,7 +125,7 @@ class LLMClient:
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, JSON]],
     ) -> AsyncIterator[str]:
         """Stream a completion from the LLM.
 
@@ -134,9 +137,9 @@ class LLMClient:
         """
         full_messages = self._build_messages(messages)
 
-        kwargs: dict[str, Any] = {
+        kwargs: dict[str, JSON] = {
             "model": self.model,
-            "messages": full_messages,
+            "messages": full_messages,  # type: ignore[dict-item]
             "stream": True,
             **self.extra_kwargs,
         }

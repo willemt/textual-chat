@@ -7,7 +7,10 @@ of what's happening during LLM response generation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Union
+
+# JSON type for tool call arguments and outputs
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 
 @dataclass
@@ -30,7 +33,7 @@ class ToolCallStart:
 
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: dict[str, JSON]
 
 
 @dataclass

@@ -13,7 +13,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Union
+
+# JSON type for session data
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 log = logging.getLogger(__name__)
 
@@ -220,7 +223,7 @@ class SessionStorage:
 
         log.debug(f"Saved session {session_id} for {agent_command}")
 
-    def get_session(self, agent_command: str) -> dict[str, Any] | None:
+    def get_session(self, agent_command: str) -> dict[str, JSON] | None:
         """Get the last session data for a specific agent (legacy API).
 
         Args:
@@ -240,7 +243,7 @@ class SessionStorage:
 
         if row:
             session_id, messages_json = row
-            result: dict[str, Any] = {"session_id": session_id}
+            result: dict[str, JSON] = {"session_id": session_id}
             if messages_json:
                 try:
                     result["messages"] = json.loads(messages_json)
