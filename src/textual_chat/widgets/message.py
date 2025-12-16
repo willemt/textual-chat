@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Union
 
@@ -22,6 +23,7 @@ class ToolUse:
 
     name: str
     args: dict[str, JSON]
+    cwd: str | None = None
 
     def __str__(self) -> str:
         if not self.args:
@@ -29,10 +31,15 @@ class ToolUse:
             return f"{self.name}()"
 
         # Format arguments concisely
+        # Use agent's cwd if provided, otherwise fall back to process cwd
+        agent_cwd = self.cwd or os.getcwd()
         parts = []
         for k, v in sorted(self.args.items(), key=lambda x: x[0]):
             # Truncate long values
             v_str = repr(v)
+            # Replace agent's cwd with ./ for display purposes
+            if agent_cwd in v_str:
+                v_str = v_str.replace(agent_cwd, ".")
             if len(v_str) > 60:
                 v_str = v_str[:57] + "..."
             parts.append(f"{k}={v_str}")

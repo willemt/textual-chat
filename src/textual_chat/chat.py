@@ -999,7 +999,7 @@ class Chat(Widget):
                             pass  # Could show thinking text in future
 
                         elif isinstance(event, ToolCallStart):
-                            tu = ToolUse(event.name, event.arguments)
+                            tu = ToolUse(event.name, event.arguments, self.cwd)
                             await assistant_widget.add_tooluse(tu, event.id)
                             self._set_status(f"Using {event.name}...")
                             tool_calls_in_progress[event.id] = (event.name, event.arguments)
