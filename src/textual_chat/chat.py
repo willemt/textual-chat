@@ -951,10 +951,11 @@ class Chat(Widget):
         self._is_responding = True
         self._cancel_requested = False
 
-        # Clear plan pane for new message
+        # Clear and hide plan pane for new message
         try:
             plan_pane = self.query_one("#chat-plan-pane", PlanPane)
             plan_pane.clear()
+            plan_pane.hide()
         except NoMatches:
             pass
 
@@ -1029,12 +1030,14 @@ class Chat(Widget):
                         elif isinstance(event, PlanChunk):
                             # Show and update plan pane with agent planning
                             if plan_pane:
-                                plan_pane.show()
                                 if event.entries:
                                     log.info(f"📋 Updating plan pane with {len(event.entries)} entries")
+                                    log.info(f"📋 PlanChunk entries: {event.entries}")
                                     await plan_pane.update_plan(event.entries)
+                                    plan_pane.show()
                                 else:
-                                    log.warning("📋 PlanChunk has no entries")
+                                    log.info("📋 PlanChunk has no entries - hiding plan pane")
+                                    plan_pane.hide()
                             else:
                                 log.warning("📋 plan_pane is None!")
 

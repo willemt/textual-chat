@@ -122,6 +122,11 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: object) -> No
 async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
     """Handle agent planning updates - send entries to UI."""
     log.info(f"📋 AgentPlanUpdate received with {len(update.entries)} entries")
+    
+    # Log the raw update for debugging
+    log.info(f"📋 Raw AgentPlanUpdate: {update}")
+    for i, entry in enumerate(update.entries):
+        log.info(f"📋   Entry {i}: content='{entry.content}', status='{entry.status}', priority={entry.priority}")
 
     # Convert entries to dicts for the event
     entries = [
@@ -133,7 +138,7 @@ async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
         for entry in update.entries
     ]
 
-    log.info(f"📋 Emitting PlanChunk with {len(entries)} entries")
+    log.info(f"📋 Emitting PlanChunk with {len(entries)} entries: {entries}")
     await cast("ACPClientHandler", client)._events.put(PlanChunk(entries=entries))
 
 
