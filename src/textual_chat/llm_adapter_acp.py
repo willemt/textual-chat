@@ -76,7 +76,7 @@ log = logging.getLogger(__name__)
 
 
 def _is_acp_client_capability(update: ACPToolCallStart | ACPToolCallProgress) -> bool:
-    """Check if a tool call is an ACP client capability (Read/Write File, Terminal).
+    """Check if a tool call is an ACP client capability (Read/Write/Edit File, Terminal).
 
     These calls will emit their own events from the capability methods with proper arguments,
     so we should mute the events that come from the agent's ACPToolCallStart updates.
@@ -84,7 +84,12 @@ def _is_acp_client_capability(update: ACPToolCallStart | ACPToolCallProgress) ->
     if hasattr(update, "field_meta") and update.field_meta:
         claude_meta = update.field_meta.get("claudeCode", {})
         tool_name_meta = claude_meta.get("toolName", "")
-        return tool_name_meta in ("mcp__acp__Read", "mcp__acp__Write", "mcp__acp__Bash")
+        return tool_name_meta in (
+            "mcp__acp__Read",
+            "mcp__acp__Write",
+            "mcp__acp__Edit",
+            "mcp__acp__Bash",
+        )
     return False
 
 
