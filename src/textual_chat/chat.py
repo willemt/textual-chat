@@ -52,7 +52,7 @@ from textual.app import ComposeResult
 # JSON type for MCP and LLM data
 JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 from textual.binding import Binding
-from textual.containers import ScrollableContainer, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -65,7 +65,7 @@ from .session_storage import SessionStorage
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
 from .utils import get_available_agents, get_available_models
-from .widgets import AgentSelectModal, MessageWidget, ModelSelectModal, SessionPromptInput, ToolUse
+from .widgets import AgentSelectModal, MessageWidget, ModelSelectModal, PlanPane, SessionPromptInput, ToolUse
 
 # Default adapter
 _default_adapter = llm_adapter_litellm
@@ -186,6 +186,16 @@ class Chat(Widget):
     DEFAULT_CSS = """
     Chat {
         width: 100%;
+        height: 100%;
+        layout: vertical;
+    }
+    Chat #chat-main-area {
+        width: 100%;
+        height: 100%;
+        layout: horizontal;
+    }
+    Chat #chat-left-side {
+        width: 1fr;
         height: 100%;
         layout: vertical;
     }
@@ -467,10 +477,13 @@ class Chat(Widget):
         return func
 
     def compose(self) -> ComposeResult:
-        yield ScrollableContainer(id="chat-messages")
-        with Vertical(id="chat-input-area"):
-            yield Static("", id="chat-status")
-            yield _ChatInput(placeholder=self.placeholder, id="chat-input")
+        with Horizontal(id="chat-main-area"):
+            with Vertical(id="chat-left-side"):
+                yield ScrollableContainer(id="chat-messages")
+                with Vertical(id="chat-input-area"):
+                    yield Static("", id="chat-status")
+                    yield _ChatInput(placeholder=self.placeholder, id="chat-input")
+            yield PlanPane(id="chat-plan-pane")
 
     async def on_mount(self) -> None:
         """Initialize model and show status on mount."""
@@ -938,6 +951,14 @@ class Chat(Widget):
         self._is_responding = True
         self._cancel_requested = False
 
+        # Clear and hide plan pane for new message
+        try:
+            plan_pane = self.query_one("#chat-plan-pane", PlanPane)
+            plan_pane.clear()
+            plan_pane.hide()
+        except NoMatches:
+            pass
+
         # Add user message to UI and history
         self._add_message("user", content)
         self._message_history.append({"role": "user", "content": content})
@@ -965,6 +986,7 @@ class Chat(Widget):
             # Use adapter's chain() for automatic tool handling (event-based streaming)
             from .events import (
                 MessageChunk,
+                PlanChunk,
                 ThoughtChunk,
                 ToolCallStart,
                 ToolCallComplete,
@@ -985,6 +1007,13 @@ class Chat(Widget):
             async def process_events_background() -> None:
                 """Process events in background task."""
                 try:
+                    # Get plan pane reference (will show it when first plan chunk arrives)
+                    plan_pane: PlanPane | None = None
+                    try:
+                        plan_pane = self.query_one("#chat-plan-pane", PlanPane)
+                    except NoMatches:
+                        pass
+                    
                     async for event in chain:
                         if self._cancel_requested:
                             break
@@ -997,6 +1026,20 @@ class Chat(Widget):
 
                         elif isinstance(event, ThoughtChunk):
                             pass  # Could show thinking text in future
+
+                        elif isinstance(event, PlanChunk):
+                            # Show and update plan pane with agent planning
+                            if plan_pane:
+                                if event.entries:
+                                    log.info(f"📋 Updating plan pane with {len(event.entries)} entries")
+                                    log.info(f"📋 PlanChunk entries: {event.entries}")
+                                    await plan_pane.update_plan(event.entries)
+                                    plan_pane.show()
+                                else:
+                                    log.info("📋 PlanChunk has no entries - hiding plan pane")
+                                    plan_pane.hide()
+                            else:
+                                log.warning("📋 plan_pane is None!")
 
                         elif isinstance(event, ToolCallStart):
                             tu = ToolUse(event.name, event.arguments, self.cwd)
@@ -1133,6 +1176,13 @@ class Chat(Widget):
         # Clear UI
         container = self.query_one("#chat-messages", ScrollableContainer)
         container.remove_children()
+        # Clear and hide plan pane
+        try:
+            plan_pane = self.query_one("#chat-plan-pane", PlanPane)
+            plan_pane.clear()
+            plan_pane.hide()
+        except NoMatches:
+            pass
         # Reset conversation in adapter
         if self._conversation:
             self._conversation.clear()

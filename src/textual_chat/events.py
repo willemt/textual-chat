@@ -28,6 +28,14 @@ class ThoughtChunk:
 
 
 @dataclass
+class PlanChunk:
+    """A chunk of agent planning/reasoning text (ACP agents)."""
+
+    text: str = ""
+    entries: list[dict[str, JSON]] | None = None
+
+
+@dataclass
 class ToolCallStart:
     """Tool call is starting."""
 
@@ -75,6 +83,7 @@ class PermissionRequest:
 StreamEvent = (
     MessageChunk
     | ThoughtChunk
+    | PlanChunk
     | ToolCallStart
     | ToolCallProgress
     | ToolCallComplete

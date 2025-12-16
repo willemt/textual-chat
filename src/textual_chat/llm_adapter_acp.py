@@ -62,6 +62,7 @@ from .agent_manager import get_agent_manager
 from .events import (
     MessageChunk,
     PermissionRequest,
+    PlanChunk,
     StreamEvent,
     ThoughtChunk,
     ToolCallComplete,
@@ -123,15 +124,27 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: object) -> No
 
 
 @_handle_update.register
-async def _handle_plan_update(update: AgentPlanUpdate, client: object) -> None:
-    """Handle agent plan updates - log for now."""
-    log.info(f"📋 Plan Update received: {len(update.entries)} entries")
-    for entry in update.entries:
-        status_icon = (
-            "⏳" if entry.status == "pending" else "🔄" if entry.status == "in_progress" else "✅"
-        )
-        log.info(f"  {status_icon} [{entry.priority}] {entry.content}")
-    # TODO: Emit PlanUpdate event for UI display
+async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
+    """Handle agent planning updates - send entries to UI."""
+    log.info(f"📋 AgentPlanUpdate received with {len(update.entries)} entries")
+    
+    # Log the raw update for debugging
+    log.info(f"📋 Raw AgentPlanUpdate: {update}")
+    for i, entry in enumerate(update.entries):
+        log.info(f"📋   Entry {i}: content='{entry.content}', status='{entry.status}', priority={entry.priority}")
+
+    # Convert entries to dicts for the event
+    entries = [
+        {
+            "content": entry.content,
+            "status": entry.status,
+            "priority": entry.priority,
+        }
+        for entry in update.entries
+    ]
+
+    log.info(f"📋 Emitting PlanChunk with {len(entries)} entries: {entries}")
+    await cast("ACPClientHandler", client)._events.put(PlanChunk(entries=entries))
 
 
 @_handle_update.register(ACPToolCallStart)
