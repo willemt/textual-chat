@@ -62,6 +62,7 @@ from .agent_manager import get_agent_manager
 from .events import (
     MessageChunk,
     PermissionRequest,
+    PlanChunk,
     StreamEvent,
     ThoughtChunk,
     ToolCallComplete,
@@ -118,15 +119,11 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: object) -> No
 
 
 @_handle_update.register
-async def _handle_plan_update(update: AgentPlanUpdate, client: object) -> None:
-    """Handle agent plan updates - log for now."""
-    log.info(f"📋 Plan Update received: {len(update.entries)} entries")
-    for entry in update.entries:
-        status_icon = (
-            "⏳" if entry.status == "pending" else "🔄" if entry.status == "in_progress" else "✅"
-        )
-        log.info(f"  {status_icon} [{entry.priority}] {entry.content}")
-    # TODO: Emit PlanUpdate event for UI display
+async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
+    """Handle agent planning updates - stream plan text to right pane."""
+    content = update.content
+    if isinstance(content, TextContentBlock):
+        await cast("ACPClientHandler", client)._events.put(PlanChunk(content.text))
 
 
 @_handle_update.register(ACPToolCallStart)

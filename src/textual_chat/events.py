@@ -28,6 +28,13 @@ class ThoughtChunk:
 
 
 @dataclass
+class PlanChunk:
+    """A chunk of agent planning/reasoning text (ACP agents)."""
+
+    text: str
+
+
+@dataclass
 class ToolCallStart:
     """Tool call is starting."""
 
@@ -75,6 +82,7 @@ class PermissionRequest:
 StreamEvent = (
     MessageChunk
     | ThoughtChunk
+    | PlanChunk
     | ToolCallStart
     | ToolCallProgress
     | ToolCallComplete
