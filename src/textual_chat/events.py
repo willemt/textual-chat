@@ -31,7 +31,8 @@ class ThoughtChunk:
 class PlanChunk:
     """A chunk of agent planning/reasoning text (ACP agents)."""
 
-    text: str
+    text: str = ""
+    entries: list[dict[str, JSON]] | None = None
 
 
 @dataclass

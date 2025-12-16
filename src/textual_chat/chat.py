@@ -1027,10 +1027,16 @@ class Chat(Widget):
                             pass  # Could show thinking text in future
 
                         elif isinstance(event, PlanChunk):
-                            # Show and update plan pane with agent planning text
+                            # Show and update plan pane with agent planning
                             if plan_pane:
                                 plan_pane.show()
-                                await plan_pane.append_text(event.text)
+                                if event.entries:
+                                    log.info(f"📋 Updating plan pane with {len(event.entries)} entries")
+                                    await plan_pane.update_plan(event.entries)
+                                else:
+                                    log.warning("📋 PlanChunk has no entries")
+                            else:
+                                log.warning("📋 plan_pane is None!")
 
                         elif isinstance(event, ToolCallStart):
                             tu = ToolUse(event.name, event.arguments, self.cwd)

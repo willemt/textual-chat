@@ -120,10 +120,21 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: object) -> No
 
 @_handle_update.register
 async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
-    """Handle agent planning updates - stream plan text to right pane."""
-    content = update.content
-    if isinstance(content, TextContentBlock):
-        await cast("ACPClientHandler", client)._events.put(PlanChunk(content.text))
+    """Handle agent planning updates - send entries to UI."""
+    log.info(f"📋 AgentPlanUpdate received with {len(update.entries)} entries")
+
+    # Convert entries to dicts for the event
+    entries = [
+        {
+            "content": entry.content,
+            "status": entry.status,
+            "priority": entry.priority,
+        }
+        for entry in update.entries
+    ]
+
+    log.info(f"📋 Emitting PlanChunk with {len(entries)} entries")
+    await cast("ACPClientHandler", client)._events.put(PlanChunk(entries=entries))
 
 
 @_handle_update.register(ACPToolCallStart)

@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
+from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import ScrollableContainer, VerticalScroll
-from textual.widgets import Markdown, Static
+from textual.containers import VerticalScroll
+from textual.widgets import ListView, ListItem, Label, Static
+
+log = logging.getLogger(__name__)
 
 
 class PlanPane(VerticalScroll):
@@ -18,20 +24,45 @@ class PlanPane(VerticalScroll):
         padding: 1;
         display: none;  /* Hidden by default */
     }
-    
+
     PlanPane.visible {
         display: block;
     }
-    
+
     PlanPane #plan-title {
         text-style: bold;
         color: $text;
         margin-bottom: 1;
     }
-    
-    PlanPane #plan-content {
-        color: $text-muted;
+
+    PlanPane ListView {
+        height: 1fr;
+        background: transparent;
+        border: none;
+    }
+
+    PlanPane ListItem {
+        background: transparent;
         padding: 0 1;
+        height: auto;
+    }
+
+    PlanPane ListItem.completed {
+        color: $success;
+    }
+
+    PlanPane ListItem.in_progress {
+        color: $warning;
+        text-style: bold;
+    }
+
+    PlanPane ListItem.pending {
+        color: $text-muted;
+    }
+
+    PlanPane ListItem Label {
+        width: 100%;
+        height: auto;
     }
     """
 
@@ -50,36 +81,54 @@ class PlanPane(VerticalScroll):
             classes: CSS classes
         """
         super().__init__(name=name, id=id, classes=classes)
-        self._content = ""
 
     def compose(self) -> ComposeResult:
         """Compose the plan pane."""
         yield Static("Agent Plan", id="plan-title")
-        yield Markdown("", id="plan-content")
+        yield ListView(id="plan-list")
 
     def clear(self) -> None:
         """Clear the plan content."""
-        self._content = ""
         try:
-            content_widget = self.query_one("#plan-content", Markdown)
-            content_widget.update("")
-        except Exception:
-            pass
+            list_view = self.query_one("#plan-list", ListView)
+            list_view.clear()
+        except Exception as e:
+            log.error(f"Failed to clear plan pane: {e}", exc_info=True)
 
-    async def append_text(self, text: str) -> None:
-        """Append text to the plan content.
+    async def update_plan(self, entries: list[dict[str, Any]]) -> None:
+        """Update plan with entries.
 
         Args:
-            text: Text to append
+            entries: List of plan entries with 'content', 'status', 'priority' fields
         """
-        self._content += text
         try:
-            content_widget = self.query_one("#plan-content", Markdown)
-            await content_widget.update(self._content)
-            # Auto-scroll to bottom
-            self.scroll_end(animate=False)
-        except Exception:
-            pass
+            list_view = self.query_one("#plan-list", ListView)
+            list_view.clear()
+
+            for entry in entries:
+                status = entry.get("status", "pending")
+                content = entry.get("content", "")
+
+                # Create status icon
+                if status == "completed":
+                    icon = "●"
+                elif status == "in_progress":
+                    icon = "▶"
+                else:  # pending
+                    icon = "○"
+
+                # Create label with icon
+                label_text = f"{icon} {content}"
+                label = Label(label_text)
+
+                # Create list item with status class
+                item = ListItem(label)
+                item.add_class(status)
+
+                await list_view.append(item)
+
+        except Exception as e:
+            log.error(f"Failed to update plan pane: {e}", exc_info=True)
 
     def show(self) -> None:
         """Show the plan pane."""
