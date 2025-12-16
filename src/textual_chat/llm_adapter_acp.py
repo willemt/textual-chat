@@ -71,6 +71,19 @@ log = logging.getLogger(__name__)
 # log.propagate = False  # TEMPORARILY ENABLED FOR DEBUGGING
 
 
+def _is_acp_client_capability(update: ACPToolCallStart | ACPToolCallProgress) -> bool:
+    """Check if a tool call is an ACP client capability (Read/Write File).
+
+    These calls will emit their own events from the capability methods with proper arguments,
+    so we should mute the events that come from the agent's ACPToolCallStart updates.
+    """
+    if hasattr(update, "field_meta") and update.field_meta:
+        claude_meta = update.field_meta.get("claudeCode", {})
+        tool_name_meta = claude_meta.get("toolName", "")
+        return tool_name_meta in ("mcp__acp__Read", "mcp__acp__Write")
+    return False
+
+
 # Singledispatch handlers for session updates
 @singledispatch
 async def _handle_update(update: object, client: object) -> None:
@@ -155,19 +168,26 @@ async def _handle_tool_call(update: ACPToolCallStart | ACPToolCallProgress, clie
         )
         handler._tool_calls[tool_call_id] = tc
 
-        # Emit ToolCallStart event
-        await handler._events.put(
-            ToolCallStart(id=tool_call_id, name=tool_name, arguments=arguments)
-        )
+        # Check if this is an MCP ACP client capability call (Read/Write)
+        # These will emit their own events with proper arguments from the capability methods
+        if _is_acp_client_capability(update):
+            handler._acp_client_capabilities.add(tool_call_id)
+            log.info(f"Muting ACP client capability tool: {tool_name}")
+        else:
+            # Emit ToolCallStart event (unless it's an ACP client capability)
+            await handler._events.put(
+                ToolCallStart(id=tool_call_id, name=tool_name, arguments=arguments)
+            )
 
-    # Emit progress/completion events
-    if status == "in_progress":
-        await handler._events.put(ToolCallProgress(id=tool_call_id, status=status))
-    elif status in ("completed", "failed"):
-        output = ""
-        if update.raw_output:
-            output = str(update.raw_output)
-        await handler._events.put(ToolCallComplete(id=tool_call_id, output=output))
+    # Emit progress/completion events (skip for ACP client capabilities)
+    if tool_call_id not in handler._acp_client_capabilities:
+        if status == "in_progress":
+            await handler._events.put(ToolCallProgress(id=tool_call_id, status=status))
+        elif status in ("completed", "failed"):
+            output = ""
+            if update.raw_output:
+                output = str(update.raw_output)
+            await handler._events.put(ToolCallComplete(id=tool_call_id, output=output))
 
 
 class CacheDetails(TypedDict, total=False):
@@ -246,6 +266,7 @@ class ACPClientHandler(Client):
         self._tool_calls: dict[str, ToolCall] = {}
         self._sessions: dict[str, str] = {}  # session_id -> cwd mapping
         self._terminals: dict[str, asyncio.subprocess.Process] = {}  # terminal_id -> process
+        self._acp_client_capabilities: set[str] = set()  # tool_call_ids for Read/Write File
 
     def register_session(self, session_id: str, cwd: str) -> None:
         """Register a session's working directory."""
@@ -258,6 +279,7 @@ class ACPClientHandler(Client):
 
         self._events = asyncio.Queue()
         self._tool_calls = {}
+        self._acp_client_capabilities.clear()
 
     async def session_update(
         self,
@@ -297,6 +319,7 @@ class ACPClientHandler(Client):
         self, content: str = "", path: str = "", session_id: str = "", **kwargs: JSON
     ) -> WriteTextFileResponse:
         """Write text file relative to session's cwd."""
+        import uuid
         from pathlib import Path
 
         from acp import RequestError
@@ -315,12 +338,22 @@ class ACPClientHandler(Client):
         full_path = Path(cwd) / path
         log.info(f"📝 Writing file: {full_path}")
 
+        # Emit ToolCallStart event for UI display
+        tool_call_id = str(uuid.uuid4())
+        arguments: dict[str, JSON] = {"path": path}
+        await self._events.put(
+            ToolCallStart(id=tool_call_id, name="Write File", arguments=arguments)
+        )
+
         try:
             # Create parent directories if needed
             full_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Write file
             full_path.write_text(content, encoding="utf-8")
+
+            # Emit ToolCallComplete event
+            await self._events.put(ToolCallComplete(id=tool_call_id, output=""))
 
             return WriteTextFileResponse()
         except Exception as e:
@@ -336,6 +369,7 @@ class ACPClientHandler(Client):
         **kwargs: JSON,
     ) -> ReadTextFileResponse:
         """Read text file relative to session's cwd."""
+        import uuid
         from pathlib import Path
 
         from acp import RequestError
@@ -353,6 +387,17 @@ class ACPClientHandler(Client):
         # Resolve path relative to cwd
         full_path = Path(cwd) / path
         log.info(f"📖 Reading file: {full_path}")
+
+        # Emit ToolCallStart event for UI display
+        tool_call_id = str(uuid.uuid4())
+        arguments: dict[str, JSON] = {"path": path}
+        if limit is not None:
+            arguments["limit"] = limit
+        if line is not None:
+            arguments["line"] = line
+        await self._events.put(
+            ToolCallStart(id=tool_call_id, name="Read File", arguments=arguments)
+        )
 
         try:
             # Check if file exists and is actually a file
@@ -375,6 +420,9 @@ class ACPClientHandler(Client):
             if limit is not None and limit > 0:
                 lines = content.splitlines(keepends=True)
                 content = "".join(lines[:limit])
+
+            # Emit ToolCallComplete event
+            await self._events.put(ToolCallComplete(id=tool_call_id, output=""))
 
             return ReadTextFileResponse(content=content)
         except RequestError:
