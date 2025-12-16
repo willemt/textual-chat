@@ -65,7 +65,15 @@ from .session_storage import SessionStorage
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
 from .utils import get_available_agents, get_available_models
-from .widgets import AgentSelectModal, MessageWidget, ModelSelectModal, PlanPane, SessionPromptInput, ToolUse
+from .widgets import (
+    AgentSelectModal,
+    MessageWidget,
+    ModelSelectModal,
+    PermissionPrompt,
+    PlanPane,
+    SessionPromptInput,
+    ToolUse,
+)
 
 # Default adapter
 _default_adapter = llm_adapter_litellm
@@ -921,6 +929,28 @@ class Chat(Widget):
         else:
             self._init_session()
 
+    def on_permission_prompt_permission_response(
+        self, event: PermissionPrompt.PermissionResponse
+    ) -> None:
+        """Handle permission response from user."""
+        log.info(f"🔐 Permission response: request_id={event.request_id}, option_id={event.option_id}")
+        
+        # Pass the response to the conversation
+        if self._conversation and hasattr(self._conversation, "respond_to_permission"):
+            self._conversation.respond_to_permission(event.request_id, event.option_id)
+        
+        # Remove the permission prompt widget
+        try:
+            # Find and remove all permission prompts (there should only be one active)
+            container = self.query_one("#chat-messages", ScrollableContainer)
+            for widget in container.query(PermissionPrompt):
+                widget.remove()
+        except Exception as e:
+            log.exception(f"Failed to remove permission prompt: {e}")
+        
+        # Update status
+        self._set_status("Permission granted, continuing...")
+
     async def on__chat_input_submitted(self, event: _ChatInput.Submitted) -> None:
         """Handle message submission."""
         content = event.content
@@ -986,6 +1016,7 @@ class Chat(Widget):
             # Use adapter's chain() for automatic tool handling (event-based streaming)
             from .events import (
                 MessageChunk,
+                PermissionRequest,
                 PlanChunk,
                 ThoughtChunk,
                 ToolCallStart,
@@ -1054,6 +1085,24 @@ class Chat(Widget):
                                 self.post_message(self.ToolCalled(name, arguments, event.output))
                                 del tool_calls_in_progress[event.id]
                             self._set_status("Responding...")
+
+                        elif isinstance(event, PermissionRequest):
+                            # Display permission prompt and wait for user response
+                            self._set_status("⚠️  Waiting for permission...")
+                            container = self.query_one("#chat-messages", ScrollableContainer)
+                            
+                            # Create and mount permission prompt widget
+                            prompt = PermissionPrompt(
+                                request_id=event.request_id,
+                                tool_call=event.tool_call,
+                                options=event.options,
+                            )
+                            container.mount(prompt)
+                            container.scroll_end(animate=False)
+                            
+                            # Note: The actual response will be handled by 
+                            # on_permission_prompt_permission_response event handler
+                            # which will call conversation.respond_to_permission()
 
                         elif isinstance(event, TokenUsage):
                             cached = event.cached_tokens

@@ -3,7 +3,16 @@
 from .agent_select import AgentSelectModal
 from .message import MessageWidget, ToolUse
 from .model_select import ModelSelectModal
+from .permission_prompt import PermissionPrompt
 from .plan_pane import PlanPane
 from .session_prompt import SessionPromptInput
 
-__all__ = ["AgentSelectModal", "MessageWidget", "ModelSelectModal", "PlanPane", "SessionPromptInput", "ToolUse"]
+__all__ = [
+    "AgentSelectModal",
+    "MessageWidget",
+    "ModelSelectModal",
+    "PermissionPrompt",
+    "PlanPane",
+    "SessionPromptInput",
+    "ToolUse",
+]
