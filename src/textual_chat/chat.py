@@ -431,6 +431,9 @@ class Chat(Widget):
         self._is_responding = False
         self._cancel_requested = False
         self._response_task: asyncio.Task[None] | None = None
+        self._current_user_message: str | None = (
+            None  # Track current prompt for interruption context
+        )
 
         # Pending messages queue for messages sent while agent is responding
         self._pending_messages: deque[tuple[str, MessageWidget | None]] = (
@@ -998,24 +1001,28 @@ class Chat(Widget):
             await self._handle_slash_command(content)
             return
 
-        # If agent is responding, queue the message
+        # If agent is responding, interrupt with the new message
         if self._is_responding:
-            # Add user message with "pending" visual state
-            pending_widget = self._add_message("user", content)
-            pending_widget.add_class("pending")
-            self._pending_messages.append((content, pending_widget))
-            self._set_status(f"Message queued ({len(self._pending_messages)} pending)...")
-            log.info(
-                f"📬 Queued message while agent is responding. Queue size: {len(self._pending_messages)}"
-            )
+            await self._interrupt_with_message(content)
             return
 
         await self._send(content)
 
     async def _send(self, content: str) -> None:
         """Send a message and get a response using the adapter."""
+        # Add user message to UI and history
+        self._add_message("user", content)
+        self._message_history.append({"role": "user", "content": content})
+        self.post_message(self.Sent(content))
+
+        # Send to agent
+        await self._send_internal(content)
+
+    async def _send_internal(self, content: str) -> None:
+        """Internal method to send a prompt to the agent (without modifying UI)."""
         self._is_responding = True
         self._cancel_requested = False
+        self._current_user_message = content  # Track for potential interruption
 
         # Clear and hide plan pane for new message
         try:
@@ -1024,11 +1031,6 @@ class Chat(Widget):
             plan_pane.hide()
         except NoMatches:
             pass
-
-        # Add user message to UI and history
-        self._add_message("user", content)
-        self._message_history.append({"role": "user", "content": content})
-        self.post_message(self.Sent(content))
 
         # Show responding indicator with animation
         # Use assistant name (from override or ACP agent)
@@ -1203,6 +1205,66 @@ class Chat(Widget):
             await assistant_widget.update_error(str(e))
             self._set_status(error_msg)
             log.exception(f"Error in _send setup: {e}")
+
+    async def _interrupt_with_message(self, new_message: str) -> None:
+        """Interrupt the current agent task with a new message.
+
+        For ACP adapter: Cancels the current task and sends a combined prompt with context.
+        For other adapters: Falls back to queuing behavior.
+        """
+        # Check if we're using ACP adapter with cancel support
+        if (
+            self._adapter.__name__ == "textual_chat.llm_adapter_acp"
+            and self._conversation
+            and hasattr(self._conversation, "_conn")
+            and hasattr(self._conversation, "_session_id")
+        ):
+            log.info(f"🔄 Interrupting agent with new message: {new_message[:50]}...")
+            self._set_status("⚡ Interrupting agent with new message...")
+
+            # Cancel the current task
+            self._cancel_requested = True
+            if self._response_task and not self._response_task.done():
+                self._response_task.cancel()
+
+            # Try to cancel at ACP level too
+            try:
+                if self._conversation._conn and self._conversation._session_id:
+                    await self._conversation._conn.cancel(self._conversation._session_id)
+                    log.info("✅ Sent ACP cancel notification")
+            except Exception as e:
+                log.warning(f"⚠️ Failed to send ACP cancel: {e}")
+
+            # Wait a brief moment for cancellation to take effect
+            await asyncio.sleep(0.1)
+
+            # Build context-aware prompt (internal, not shown to user)
+            original_task = self._current_user_message or "the previous task"
+            combined_prompt = f"""[Context: I was working on: "{original_task}"]
+
+[INTERRUPTION] The user has sent a new message that takes priority:
+
+{new_message}
+
+Please address this new message. If it's related to the previous task, you may continue with that context. If it's unrelated, focus on the new request."""
+
+            # Add user's actual message to UI (not the combined prompt)
+            self._add_message("user", new_message)
+            self._message_history.append({"role": "user", "content": new_message})
+            self.post_message(self.Sent(new_message))
+
+            # Send the combined prompt to agent (with context)
+            await self._send_internal(combined_prompt)
+
+        else:
+            # Fallback to queuing for non-ACP or unsupported adapters
+            log.info(
+                f"📬 Queuing message (adapter doesn't support interruption): {new_message[:50]}..."
+            )
+            pending_widget = self._add_message("user", new_message)
+            pending_widget.add_class("pending")
+            self._pending_messages.append((new_message, pending_widget))
+            self._set_status(f"Message queued ({len(self._pending_messages)} pending)...")
 
     async def _process_next_queued_message(self) -> None:
         """Process the next message in the queue if any."""
