@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import deque
 
 # Setup logging to file (controlled by TEXTUAL_CHAT_LOGGING_LEVEL env var)
 _log_level = os.environ.get("TEXTUAL_CHAT_LOGGING_LEVEL", "").upper()
@@ -246,6 +247,10 @@ class Chat(Widget):
     Chat .message.user {
         border: round $primary;
     }
+    Chat .message.user.pending {
+        border: round $warning;
+        opacity: 0.7;
+    }
     Chat .message.assistant {
         border: round $accent;
     }
@@ -426,6 +431,11 @@ class Chat(Widget):
         self._is_responding = False
         self._cancel_requested = False
         self._response_task: asyncio.Task[None] | None = None
+
+        # Pending messages queue for messages sent while agent is responding
+        self._pending_messages: deque[tuple[str, MessageWidget | None]] = (
+            deque()
+        )  # (content, pending_widget)
 
         # Register initial tools (smart detection)
         if tools:
@@ -968,7 +978,7 @@ class Chat(Widget):
     async def on__chat_input_submitted(self, event: _ChatInput.Submitted) -> None:
         """Handle message submission."""
         content = event.content
-        if not content or self._is_responding:
+        if not content:
             return
 
         if self._config_error:
@@ -983,9 +993,21 @@ class Chat(Widget):
             )
             return
 
-        # Handle slash commands
+        # Handle slash commands (always process immediately, even while responding)
         if content.startswith("/"):
             await self._handle_slash_command(content)
+            return
+
+        # If agent is responding, queue the message
+        if self._is_responding:
+            # Add user message with "pending" visual state
+            pending_widget = self._add_message("user", content)
+            pending_widget.add_class("pending")
+            self._pending_messages.append((content, pending_widget))
+            self._set_status(f"Message queued ({len(self._pending_messages)} pending)...")
+            log.info(
+                f"📬 Queued message while agent is responding. Queue size: {len(self._pending_messages)}"
+            )
             return
 
         await self._send(content)
@@ -1151,6 +1173,9 @@ class Chat(Widget):
 
                     self._save_session()
 
+                    # Process next queued message if any
+                    await self._process_next_queued_message()
+
                 except asyncio.CancelledError:
                     assistant_widget.mark_complete()
                     await assistant_widget.update_content("*Cancelled*")
@@ -1162,6 +1187,9 @@ class Chat(Widget):
                     log.exception(f"Error in background event processing: {e}")
                 finally:
                     self._is_responding = False
+                    # Process next queued message even after error/cancel
+                    if not self._cancel_requested:
+                        await self._process_next_queued_message()
 
             # Start background task and store reference
             self._response_task = asyncio.create_task(process_events_background())
@@ -1175,6 +1203,201 @@ class Chat(Widget):
             await assistant_widget.update_error(str(e))
             self._set_status(error_msg)
             log.exception(f"Error in _send setup: {e}")
+
+    async def _process_next_queued_message(self) -> None:
+        """Process the next message in the queue if any."""
+        if not self._pending_messages:
+            return
+
+        # Get next message from queue
+        content, pending_widget = self._pending_messages.popleft()
+
+        log.info(f"📨 Processing queued message. Remaining in queue: {len(self._pending_messages)}")
+
+        # Remove "pending" class from the widget to show it's being processed
+        if pending_widget:
+            pending_widget.remove_class("pending")
+
+        # Update status
+        if self._pending_messages:
+            self._set_status(
+                f"Processing queued message ({len(self._pending_messages)} remaining)..."
+            )
+        else:
+            self._set_status("Processing queued message...")
+
+        # Send the queued message (this will recursively handle the queue)
+        # Note: We don't add the message to UI again since it's already there from queuing
+        await self._send_queued(content)
+
+    async def _send_queued(self, content: str) -> None:
+        """Send a message that was already added to UI when queued."""
+        self._is_responding = True
+        self._cancel_requested = False
+
+        # Clear and hide plan pane for new message
+        try:
+            plan_pane = self.query_one("#chat-plan-pane", PlanPane)
+            plan_pane.clear()
+            plan_pane.hide()
+        except NoMatches:
+            pass
+
+        # Add to message history (UI was already updated when queued)
+        self._message_history.append({"role": "user", "content": content})
+        self.post_message(self.Sent(content))
+
+        # Show responding indicator with animation
+        agent_title = self._get_assistant_title()
+        assistant_widget = self._add_message("assistant", loading=True, title=agent_title)
+        self._set_status("Responding...")
+
+        try:
+            # Guard against uninitialized conversation
+            if not self._conversation:
+                self._show_error("Conversation not initialized")
+                assistant_widget.mark_complete()
+                return
+
+            # Get tools list for adapter
+            tools = list(self._tools.values()) if self._tools else None
+
+            # Build options for caching
+            options = {"cache": self._model.is_claude} if self._model else {}
+
+            # Use adapter's chain() for automatic tool handling (event-based streaming)
+            from .events import (
+                MessageChunk,
+                PlanChunk,
+                ThoughtChunk,
+                ToolCallStart,
+                ToolCallComplete,
+                TokenUsage,
+            )
+
+            chain = self._conversation.chain(
+                content,
+                system=self.system,
+                tools=tools,
+                options=options,
+            )
+
+            # Run event processing in background task to keep UI responsive
+            full_text_container = {"text": ""}
+            tool_calls_in_progress: dict[str, tuple[str, dict]] = {}
+
+            async def process_events_background() -> None:
+                """Process events in background task."""
+                try:
+                    # Get plan pane reference
+                    plan_pane: PlanPane | None = None
+                    try:
+                        plan_pane = self.query_one("#chat-plan-pane", PlanPane)
+                    except NoMatches:
+                        pass
+
+                    async for event in chain:
+                        if self._cancel_requested:
+                            break
+
+                        # Handle different event types
+                        if isinstance(event, MessageChunk):
+                            stream = await assistant_widget.ensure_stream()
+                            await stream.write(event.text)  # type: ignore[attr-defined]
+                            full_text_container["text"] += event.text
+
+                        elif isinstance(event, ThoughtChunk):
+                            pass
+
+                        elif isinstance(event, PlanChunk):
+                            if plan_pane:
+                                if event.entries:
+                                    log.info(
+                                        f"📋 Updating plan pane with {len(event.entries)} entries"
+                                    )
+                                    log.info(f"📋 PlanChunk entries: {event.entries}")
+                                    await plan_pane.update_plan(event.entries)
+                                    plan_pane.show()
+                                else:
+                                    log.info("📋 PlanChunk has no entries - hiding plan pane")
+                                    plan_pane.hide()
+                            else:
+                                log.warning("📋 plan_pane is None!")
+
+                        elif isinstance(event, ToolCallStart):
+                            tu = ToolUse(event.name, event.arguments, self.cwd)
+                            await assistant_widget.add_tooluse(tu, event.id)
+                            self._set_status(f"Using {event.name}...")
+                            tool_calls_in_progress[event.id] = (event.name, event.arguments)
+
+                        elif isinstance(event, ToolCallComplete):
+                            assistant_widget.complete_tooluse(event.id)
+                            if event.id in tool_calls_in_progress:
+                                name, arguments = tool_calls_in_progress[event.id]
+                                self.post_message(self.ToolCalled(name, arguments, event.output))
+                                del tool_calls_in_progress[event.id]
+                            self._set_status("Responding...")
+
+                        elif isinstance(event, TokenUsage):
+                            cached = event.cached_tokens
+                            llm_log.debug(
+                                f"=== Token Usage ===\n"
+                                f"Input: {event.prompt_tokens}, Output: {event.completion_tokens}, Cached: {cached}"
+                            )
+                            if self.show_token_usage:
+                                assistant_widget.set_token_usage(
+                                    event.prompt_tokens, event.completion_tokens, cached
+                                )
+
+                    # Close the stream and mark complete
+                    if assistant_widget._stream:
+                        await assistant_widget._stream.stop()  # type: ignore[attr-defined]
+                    assistant_widget.mark_complete()
+
+                    # Scroll to bottom
+                    container = self.query_one("#chat-messages", ScrollableContainer)
+                    container.scroll_end(animate=False)
+
+                    llm_log.debug(f"=== LLM Response ===\n{full_text_container['text']}")
+                    self._set_status("")
+                    self.post_message(self.Responded(full_text_container["text"]))
+
+                    # Track assistant response in history
+                    self._message_history.append(
+                        {"role": "assistant", "content": full_text_container["text"]}
+                    )
+
+                    self._save_session()
+
+                    # Process next queued message if any
+                    await self._process_next_queued_message()
+
+                except asyncio.CancelledError:
+                    assistant_widget.mark_complete()
+                    await assistant_widget.update_content("*Cancelled*")
+                    self._set_status("Cancelled")
+                except Exception as e:
+                    assistant_widget.mark_complete()
+                    await assistant_widget.update_error(str(e))
+                    self._set_status(f"Error: {e}")
+                    log.exception(f"Error in background event processing: {e}")
+                finally:
+                    self._is_responding = False
+                    # Process next queued message even after error/cancel
+                    if not self._cancel_requested:
+                        await self._process_next_queued_message()
+
+            # Start background task and store reference
+            self._response_task = asyncio.create_task(process_events_background())
+
+        except Exception as e:
+            # Handle setup errors
+            self._is_responding = False
+            assistant_widget.mark_complete()
+            error_msg = f"Error: {e}"
+            await assistant_widget.update_error(str(e))
+            self._set_status(error_msg)
+            log.exception(f"Error in _send_queued setup: {e}")
 
     async def _handle_slash_command(self, command: str) -> None:
         """Handle slash commands like /model and /agent."""
@@ -1253,19 +1476,31 @@ class Chat(Widget):
             self._conversation.clear()
         # Clear message history
         self._message_history.clear()
+        # Clear message queue
+        self._pending_messages.clear()
         # Clear stored session for ACP adapter
         if self._session_storage and self._model:
             self._session_storage.clear_session(self._model.model_id)
         self._set_status("Cleared")
 
     def action_cancel(self) -> None:
-        """Cancel current response."""
+        """Cancel current response and clear the message queue."""
         if self._is_responding:
             self._cancel_requested = True
             # Cancel the background task if it exists
             if self._response_task and not self._response_task.done():
                 self._response_task.cancel()
-            self._set_status("Cancelling...")
+            # Clear the message queue and remove pending messages from UI
+            queue_size = len(self._pending_messages)
+            for _, pending_widget in self._pending_messages:
+                if pending_widget:
+                    pending_widget.remove()
+            self._pending_messages.clear()
+
+            if queue_size > 0:
+                self._set_status(f"Cancelled (cleared {queue_size} queued messages)")
+            else:
+                self._set_status("Cancelling...")
 
     # Convenience methods for programmatic use
 
