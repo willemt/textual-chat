@@ -278,6 +278,7 @@ class Chat(Widget):
 
     BINDINGS = [
         Binding("ctrl+l", "clear", "Clear", show=True),
+        Binding("ctrl+c", "cancel", "Interrupt", show=True),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -1044,7 +1045,7 @@ class Chat(Widget):
                         plan_pane = self.query_one("#chat-plan-pane", PlanPane)
                     except NoMatches:
                         pass
-                    
+
                     async for event in chain:
                         if self._cancel_requested:
                             break
@@ -1062,7 +1063,9 @@ class Chat(Widget):
                             # Show and update plan pane with agent planning
                             if plan_pane:
                                 if event.entries:
-                                    log.info(f"📋 Updating plan pane with {len(event.entries)} entries")
+                                    log.info(
+                                        f"📋 Updating plan pane with {len(event.entries)} entries"
+                                    )
                                     log.info(f"📋 PlanChunk entries: {event.entries}")
                                     await plan_pane.update_plan(event.entries)
                                     plan_pane.show()
