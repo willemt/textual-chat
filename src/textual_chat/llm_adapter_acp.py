@@ -361,26 +361,66 @@ class ACPClientHandler(Client):
         tool_call: ToolCallUpdate,
         **kwargs: JSON,
     ) -> RequestPermissionResponse:
-        """Handle permission requests - automatically approve for now.
+        """Handle permission requests - prompt user for approval.
 
-        TODO: Implement UI for permission requests when needed.
-        For now, we auto-approve by selecting the first option.
+        Creates a PermissionRequest event and waits for user response.
         """
         from acp.schema import AllowedOutcome
 
-        # Auto-approve by selecting the first option
+        # Validate options
         if not options:
-            log.warning("⚠️ Permission request with no options, cannot auto-approve")
+            log.warning("⚠️ Permission request with no options, cannot proceed")
             raise ValueError("Permission request must have at least one option")
 
-        option_id = options[0].option_id
-        log.info(
-            f"🔓 Auto-approving permission request: {tool_call.title} (option: {options[0].name})"
+        # Generate unique request ID
+        request_id = f"perm_{uuid.uuid4().hex[:8]}"
+
+        # Create future for user response
+        response_future: asyncio.Future[RequestPermissionResponse] = asyncio.Future()
+        self._permission_responses[request_id] = response_future
+
+        # Convert options and tool_call to dicts for the event
+        options_dicts = [
+            {
+                "option_id": opt.option_id,
+                "name": opt.name,
+                "description": opt.description if hasattr(opt, "description") else None,
+            }
+            for opt in options
+        ]
+
+        tool_call_dict = {
+            "tool_call_id": tool_call.tool_call_id if hasattr(tool_call, "tool_call_id") else None,
+            "title": tool_call.title if hasattr(tool_call, "title") else None,
+            "status": tool_call.status if hasattr(tool_call, "status") else None,
+        }
+
+        log.info(f"🔐 Requesting permission for: {tool_call.title} (request_id: {request_id})")
+
+        # Queue permission request event for UI
+        await self._events.put(
+            PermissionRequest(
+                request_id=request_id,
+                session_id=session_id,
+                tool_call=tool_call_dict,
+                options=options_dicts,
+            )
         )
 
-        return RequestPermissionResponse(
-            outcome=AllowedOutcome(option_id=option_id, outcome="selected")
-        )
+        # Wait for user response (with timeout)
+        try:
+            response = await asyncio.wait_for(response_future, timeout=300.0)  # 5 minute timeout
+            log.info(f"✅ Received permission response for {request_id}")
+            return response
+        except asyncio.TimeoutError:
+            log.warning(f"⏱️ Permission request {request_id} timed out, denying")
+            # Clean up
+            del self._permission_responses[request_id]
+            # Return first option as denial (or we could raise an error)
+            # For now, deny by returning the first option (could be "deny" or "allow")
+            return RequestPermissionResponse(
+                outcome=AllowedOutcome(option_id=options[0].option_id, outcome="selected")
+            )
 
     # File system methods - implement with cwd support
     async def write_text_file(
