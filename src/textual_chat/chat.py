@@ -65,7 +65,14 @@ from .session_storage import SessionStorage
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
 from .utils import get_available_agents, get_available_models
-from .widgets import AgentSelectModal, MessageWidget, ModelSelectModal, PlanPane, SessionPromptInput, ToolUse
+from .widgets import (
+    AgentSelectModal,
+    MessageWidget,
+    ModelSelectModal,
+    PlanPane,
+    SessionPromptInput,
+    ToolUse,
+)
 
 # Default adapter
 _default_adapter = llm_adapter_litellm
@@ -105,6 +112,7 @@ class _ChatInput(TextArea):
         self,
         placeholder: str = "Message...",
         *,
+        title: str | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -112,10 +120,13 @@ class _ChatInput(TextArea):
         super().__init__(name=name, id=id, classes=classes)
         self.show_line_numbers = False
         self._placeholder = placeholder
+        self._title = title
 
     def on_mount(self) -> None:
-        """Set placeholder after mount."""
+        """Set placeholder and border title after mount."""
         self.placeholder = self._placeholder
+        if self._title:
+            self.border_title = self._title
 
     async def _on_key(self, event: object) -> None:
         """Handle key presses."""
@@ -331,6 +342,7 @@ class Chat(Widget):
         introspect_scope: Literal["app", "screen", "parent"] = "app",
         assistant_name: str | None = None,
         cwd: str | None = None,
+        title: str | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -355,6 +367,7 @@ class Chat(Widget):
             introspect_scope: Scope for introspection - "app", "screen", or "parent" (default "app").
             assistant_name: Override the assistant's display name (defaults to agent name from ACP or "Assistant").
             cwd: Working directory for ACP adapter (optional).
+            title: Border title for the message input widget (optional).
             **llm_kwargs: Extra args passed to LiteLLM
         """
 
@@ -377,6 +390,7 @@ class Chat(Widget):
         self._base_system = system or "You are a helpful assistant."
         self.system = self._base_system  # May be augmented by introspection
         self.placeholder = placeholder
+        self.title = title  # Border title for input widget
         self.api_key = api_key
         self.api_base = api_base
         self.temperature = temperature
@@ -482,7 +496,9 @@ class Chat(Widget):
                 yield ScrollableContainer(id="chat-messages")
                 with Vertical(id="chat-input-area"):
                     yield Static("", id="chat-status")
-                    yield _ChatInput(placeholder=self.placeholder, id="chat-input")
+                    yield _ChatInput(
+                        placeholder=self.placeholder, title=self.title, id="chat-input"
+                    )
             yield PlanPane(id="chat-plan-pane")
 
     async def on_mount(self) -> None:
@@ -908,7 +924,9 @@ class Chat(Widget):
             prompt = self.query_one("#session-prompt", SessionPromptInput)
             prompt.remove()
             input_area = self.query_one("#chat-input-area")
-            input_area.mount(_ChatInput(placeholder=self.placeholder, id="chat-input"))
+            input_area.mount(
+                _ChatInput(placeholder=self.placeholder, title=self.title, id="chat-input")
+            )
         except Exception as e:
             log.exception(f"Failed to restore input: {e}")
             return
@@ -1013,7 +1031,7 @@ class Chat(Widget):
                         plan_pane = self.query_one("#chat-plan-pane", PlanPane)
                     except NoMatches:
                         pass
-                    
+
                     async for event in chain:
                         if self._cancel_requested:
                             break
@@ -1031,7 +1049,9 @@ class Chat(Widget):
                             # Show and update plan pane with agent planning
                             if plan_pane:
                                 if event.entries:
-                                    log.info(f"📋 Updating plan pane with {len(event.entries)} entries")
+                                    log.info(
+                                        f"📋 Updating plan pane with {len(event.entries)} entries"
+                                    )
                                     log.info(f"📋 PlanChunk entries: {event.entries}")
                                     await plan_pane.update_plan(event.entries)
                                     plan_pane.show()
