@@ -1546,23 +1546,13 @@ Please address this new message. If it's related to the previous task, you may c
         self._set_status("Cleared")
 
     def action_cancel(self) -> None:
-        """Cancel current response and clear the message queue."""
+        """Cancel current response."""
         if self._is_responding:
             self._cancel_requested = True
             # Cancel the background task if it exists
             if self._response_task and not self._response_task.done():
                 self._response_task.cancel()
-            # Clear the message queue and remove pending messages from UI
-            queue_size = len(self._pending_messages)
-            for _, pending_widget in self._pending_messages:
-                if pending_widget:
-                    pending_widget.remove()
-            self._pending_messages.clear()
-
-            if queue_size > 0:
-                self._set_status(f"Cancelled (cleared {queue_size} queued messages)")
-            else:
-                self._set_status("Cancelling...")
+            self._set_status("⚡ Interrupted")
 
     # Convenience methods for programmatic use
 
