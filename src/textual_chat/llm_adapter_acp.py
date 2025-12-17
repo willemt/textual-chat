@@ -389,7 +389,7 @@ class ACPClientHandler(Client):
             for opt in options
         ]
 
-        tool_call_dict = {
+        tool_call_dict: dict[str, JSON] = {
             "tool_call_id": tool_call.tool_call_id if hasattr(tool_call, "tool_call_id") else None,
             "title": tool_call.title if hasattr(tool_call, "title") else None,
             "status": tool_call.status if hasattr(tool_call, "status") else None,
@@ -397,8 +397,9 @@ class ACPClientHandler(Client):
 
         log.info(f"🔐 Requesting permission for: {tool_call.title} (request_id: {request_id})")
 
-        # Queue permission request event for UI
-        await self._events.put(
+        # Queue permission request event for UI (route to session-specific queue)
+        queue = self.get_session_queue(session_id)
+        await queue.put(
             PermissionRequest(
                 request_id=request_id,
                 session_id=session_id,
