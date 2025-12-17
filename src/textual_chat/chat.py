@@ -126,6 +126,10 @@ class _ChatInput(TextArea):
 
     async def _on_key(self, event: object) -> None:
         """Handle key presses."""
+        # Let parent handle interrupt/cancel keys (don't stop propagation)
+        if event.key in ("ctrl+x", "escape"):  # type: ignore[attr-defined]
+            return
+
         # Shift+Enter (comes through as ctrl+j) - insert newline
         if event.key == "ctrl+j":  # type: ignore[attr-defined]
             self.insert("\n")
@@ -277,7 +281,7 @@ class Chat(Widget):
 
     BINDINGS = [
         Binding("ctrl+l", "clear", "Clear", show=True),
-        Binding("ctrl+c", "cancel", "Interrupt", show=True),
+        Binding("ctrl+x", "cancel", "Interrupt", show=True),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 

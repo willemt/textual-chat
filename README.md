@@ -202,7 +202,7 @@ See `examples/chatbot_sidebar.py` and `examples/chatbot_modal.py` for complete e
 ## Keyboard Shortcuts
 
 - `Ctrl+L` - Clear chat
-- `Ctrl+C` - Interrupt agent response
+- `Ctrl+X` - Interrupt agent response
 - `Escape` - Cancel response
 - `Enter` - Send message
 - `/model` - Switch model (if enabled)
