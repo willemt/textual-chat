@@ -127,14 +127,16 @@ async def _handle_agent_thought(update: AgentThoughtChunk, client: object) -> No
 async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
     """Handle agent planning updates - send entries to UI."""
     log.info(f"📋 AgentPlanUpdate received with {len(update.entries)} entries")
-    
+
     # Log the raw update for debugging
     log.info(f"📋 Raw AgentPlanUpdate: {update}")
     for i, entry in enumerate(update.entries):
-        log.info(f"📋   Entry {i}: content='{entry.content}', status='{entry.status}', priority={entry.priority}")
+        log.info(
+            f"📋   Entry {i}: content='{entry.content}', status='{entry.status}', priority={entry.priority}"
+        )
 
     # Convert entries to dicts for the event
-    entries = [
+    entries: list[dict[str, JSON]] = [
         {
             "content": entry.content,
             "status": entry.status,

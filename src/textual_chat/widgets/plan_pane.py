@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Union
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import ListView, ListItem, Label, Static
+
+# JSON type for plan data
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 log = logging.getLogger(__name__)
 
@@ -18,7 +21,7 @@ class PlanPane(VerticalScroll):
 
     DEFAULT_CSS = """
     PlanPane {
-        width: 35%;
+        width: 28%;
         height: 100%;
         border-left: solid $primary-darken-2;
         padding: 1;
@@ -95,7 +98,7 @@ class PlanPane(VerticalScroll):
         except Exception as e:
             log.error(f"Failed to clear plan pane: {e}", exc_info=True)
 
-    async def update_plan(self, entries: list[dict[str, Any]]) -> None:
+    async def update_plan(self, entries: list[dict[str, JSON]]) -> None:
         """Update plan with entries.
 
         Args:
@@ -104,15 +107,19 @@ class PlanPane(VerticalScroll):
         try:
             log.info(f"📋 PlanPane.update_plan called with {len(entries)} entries")
             log.info(f"📋 Entries received: {entries}")
-            
+
             list_view = self.query_one("#plan-list", ListView)
             list_view.clear()
             log.info(f"📋 Cleared list_view")
 
             for i, entry in enumerate(entries):
-                status = entry.get("status", "pending")
-                content = entry.get("content", "")
-                
+                status_val = entry.get("status", "pending")
+                content_val = entry.get("content", "")
+
+                # Ensure status and content are strings
+                status = str(status_val) if status_val is not None else "pending"
+                content = str(content_val) if content_val is not None else ""
+
                 log.info(f"📋 Processing entry {i}: status='{status}', content='{content}'")
 
                 # Create status icon
@@ -133,8 +140,10 @@ class PlanPane(VerticalScroll):
 
                 await list_view.append(item)
                 log.info(f"📋 Appended item {i} to list_view")
-            
-            log.info(f"📋 PlanPane.update_plan completed, list_view has {len(list_view.children)} items")
+
+            log.info(
+                f"📋 PlanPane.update_plan completed, list_view has {len(list_view.children)} items"
+            )
 
         except Exception as e:
             log.error(f"Failed to update plan pane: {e}", exc_info=True)
