@@ -95,37 +95,43 @@ def _is_acp_client_capability(update: ACPToolCallStart | ACPToolCallProgress) ->
 
 # Singledispatch handlers for session updates
 @singledispatch
-async def _handle_update(update: object, client: object) -> None:
+async def _handle_update(update: object, client: object, session_id: str) -> None:
     """Default handler for unknown update types."""
     log.warning(f"⚠️  Unhandled update type: {type(update).__name__} - {update}")
 
 
 @_handle_update.register
-async def _handle_user_message(update: UserMessageChunk, client: object) -> None:
+async def _handle_user_message(update: UserMessageChunk, client: object, session_id: str) -> None:
     """Handle user message chunks (debugging only)."""
     log.warning(f"⚠️  RECEIVED UserMessageChunk (should NOT queue this): {update.content}")
 
 
 @_handle_update.register
-async def _handle_agent_message(update: AgentMessageChunk, client: object) -> None:
+async def _handle_agent_message(update: AgentMessageChunk, client: object, session_id: str) -> None:
     """Handle agent message chunks - stream text."""
+    handler = cast("ACPClientHandler", client)
+    queue = handler.get_session_queue(session_id)
     content = update.content
     if isinstance(content, TextContentBlock):
-        await cast("ACPClientHandler", client)._events.put(MessageChunk(content.text))
+        await queue.put(MessageChunk(content.text))
 
 
 @_handle_update.register
-async def _handle_agent_thought(update: AgentThoughtChunk, client: object) -> None:
+async def _handle_agent_thought(update: AgentThoughtChunk, client: object, session_id: str) -> None:
     """Handle agent thinking chunks - stream thinking text."""
-
+    handler = cast("ACPClientHandler", client)
+    queue = handler.get_session_queue(session_id)
     content = update.content
     if isinstance(content, TextContentBlock):
-        await cast("ACPClientHandler", client)._events.put(ThoughtChunk(content.text))
+        await queue.put(ThoughtChunk(content.text))
 
 
 @_handle_update.register
-async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
+async def _handle_agent_plan(update: AgentPlanUpdate, client: object, session_id: str) -> None:
     """Handle agent planning updates - send entries to UI."""
+    handler = cast("ACPClientHandler", client)
+    queue = handler.get_session_queue(session_id)
+
     log.info(f"📋 AgentPlanUpdate received with {len(update.entries)} entries")
 
     # Log the raw update for debugging
@@ -146,14 +152,17 @@ async def _handle_agent_plan(update: AgentPlanUpdate, client: object) -> None:
     ]
 
     log.info(f"📋 Emitting PlanChunk with {len(entries)} entries: {entries}")
-    await cast("ACPClientHandler", client)._events.put(PlanChunk(entries=entries))
+    await queue.put(PlanChunk(entries=entries))
 
 
 @_handle_update.register(ACPToolCallStart)
 @_handle_update.register(ACPToolCallProgress)
-async def _handle_tool_call(update: ACPToolCallStart | ACPToolCallProgress, client: object) -> None:
+async def _handle_tool_call(
+    update: ACPToolCallStart | ACPToolCallProgress, client: object, session_id: str
+) -> None:
     """Handle tool call start and progress updates."""
     handler = cast("ACPClientHandler", client)
+    queue = handler.get_session_queue(session_id)
 
     tool_call_id = update.tool_call_id or ""
     status = update.status or ""
@@ -198,19 +207,17 @@ async def _handle_tool_call(update: ACPToolCallStart | ACPToolCallProgress, clie
             log.info(f"Muting ACP client capability tool: {tool_name}")
         else:
             # Emit ToolCallStart event (unless it's an ACP client capability)
-            await handler._events.put(
-                ToolCallStart(id=tool_call_id, name=tool_name, arguments=arguments)
-            )
+            await queue.put(ToolCallStart(id=tool_call_id, name=tool_name, arguments=arguments))
 
     # Emit progress/completion events (skip for ACP client capabilities)
     if tool_call_id not in handler._acp_client_capabilities:
         if status == "in_progress":
-            await handler._events.put(ToolCallProgress(id=tool_call_id, status=status))
+            await queue.put(ToolCallProgress(id=tool_call_id, status=status))
         elif status in ("completed", "failed"):
             output = ""
             if update.raw_output:
                 output = str(update.raw_output)
-            await handler._events.put(ToolCallComplete(id=tool_call_id, output=output))
+            await queue.put(ToolCallComplete(id=tool_call_id, output=output))
 
 
 class CacheDetails(TypedDict, total=False):
@@ -285,7 +292,9 @@ class ACPClientHandler(Client):
     def __init__(self) -> None:
         from .events import StreamEvent
 
-        self._events: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+        self._session_events: dict[str, asyncio.Queue[StreamEvent | None]] = (
+            {}
+        )  # session_id -> queue
         self._tool_calls: dict[str, ToolCall] = {}
         self._sessions: dict[str, str] = {}  # session_id -> cwd mapping
         self._terminals: dict[str, asyncio.subprocess.Process] = {}  # terminal_id -> process
@@ -295,15 +304,33 @@ class ACPClientHandler(Client):
         )  # request_id -> future
 
     def register_session(self, session_id: str, cwd: str) -> None:
-        """Register a session's working directory."""
-        self._sessions[session_id] = cwd
-        log.debug(f"Registered session {session_id} with cwd: {cwd}")
-
-    def reset_for_turn(self) -> None:
-        """Reset state for a new turn."""
+        """Register a session's working directory and create its event queue."""
         from .events import StreamEvent
 
-        self._events = asyncio.Queue()
+        self._sessions[session_id] = cwd
+        if session_id not in self._session_events:
+            self._session_events[session_id] = asyncio.Queue()
+        log.debug(f"Registered session {session_id} with cwd: {cwd}")
+
+    def get_session_queue(self, session_id: str) -> asyncio.Queue["StreamEvent | None"]:
+        """Get the event queue for a session."""
+        from .events import StreamEvent
+
+        if session_id not in self._session_events:
+            self._session_events[session_id] = asyncio.Queue()
+        return self._session_events[session_id]
+
+    def unregister_session(self, session_id: str) -> None:
+        """Unregister a session and clean up its resources."""
+        self._sessions.pop(session_id, None)
+        self._session_events.pop(session_id, None)
+        log.debug(f"Unregistered session {session_id}")
+
+    def reset_for_turn(self) -> None:
+        """Reset state for a new turn.
+
+        Note: We don't clear session_events since they're per-session queues.
+        """
         self._tool_calls = {}
         self._acp_client_capabilities.clear()
         self._permission_responses = {}
@@ -325,7 +352,7 @@ class ACPClientHandler(Client):
     ) -> None:
         """Handle session updates from the agent using singledispatch."""
         log.debug(f"📨 session_update received: {type(update).__name__} {update} {kwargs}")
-        await _handle_update(update, self)
+        await _handle_update(update, self, session_id)
 
     async def request_permission(
         self,
@@ -379,9 +406,8 @@ class ACPClientHandler(Client):
         # Emit ToolCallStart event for UI display
         tool_call_id = str(uuid.uuid4())
         arguments: dict[str, JSON] = {"path": path}
-        await self._events.put(
-            ToolCallStart(id=tool_call_id, name="Write File", arguments=arguments)
-        )
+        queue = self.get_session_queue(session_id)
+        await queue.put(ToolCallStart(id=tool_call_id, name="Write File", arguments=arguments))
 
         try:
             # Create parent directories if needed
@@ -391,7 +417,7 @@ class ACPClientHandler(Client):
             full_path.write_text(content, encoding="utf-8")
 
             # Emit ToolCallComplete event
-            await self._events.put(ToolCallComplete(id=tool_call_id, output=""))
+            await queue.put(ToolCallComplete(id=tool_call_id, output=""))
 
             return WriteTextFileResponse()
         except Exception as e:
@@ -430,9 +456,8 @@ class ACPClientHandler(Client):
             arguments["limit"] = limit
         if line is not None:
             arguments["line"] = line
-        await self._events.put(
-            ToolCallStart(id=tool_call_id, name="Read File", arguments=arguments)
-        )
+        queue = self.get_session_queue(session_id)
+        await queue.put(ToolCallStart(id=tool_call_id, name="Read File", arguments=arguments))
 
         try:
             # Check if file exists and is actually a file
@@ -457,7 +482,7 @@ class ACPClientHandler(Client):
                 content = "".join(lines[:limit])
 
             # Emit ToolCallComplete event
-            await self._events.put(ToolCallComplete(id=tool_call_id, output=""))
+            await queue.put(ToolCallComplete(id=tool_call_id, output=""))
 
             return ReadTextFileResponse(content=content)
         except RequestError:
@@ -504,7 +529,8 @@ class ACPClientHandler(Client):
         arguments: dict[str, JSON] = {"command": command}
         if args:
             arguments["args"] = cast(JSON, args)
-        await self._events.put(ToolCallStart(id=tool_call_id, name="Terminal", arguments=arguments))
+        queue = self.get_session_queue(session_id)
+        await queue.put(ToolCallStart(id=tool_call_id, name="Terminal", arguments=arguments))
 
         # Build environment dict if provided
         env_dict = None
@@ -530,7 +556,7 @@ class ACPClientHandler(Client):
             self._terminals[terminal_id] = process
 
             # Emit ToolCallComplete event
-            await self._events.put(ToolCallComplete(id=tool_call_id, output=""))
+            await queue.put(ToolCallComplete(id=tool_call_id, output=""))
 
             return CreateTerminalResponse(terminal_id=terminal_id)
         except Exception as e:
@@ -647,9 +673,8 @@ class ACPClientHandler(Client):
         """Handle extension notifications."""
         return None
 
-    def signal_done(self) -> None:
-        """Signal that streaming is complete."""
-        self._events.put_nowait(None)
+    # Note: signal_done is no longer used with session-specific queues
+    # Completion is signaled by putting None into the session's queue
 
     def respond_to_permission(self, request_id: str, option_id: str) -> None:
         """Respond to a permission request.
@@ -959,6 +984,9 @@ class AsyncChainResponse:
         # Reset client for new turn
         client.reset_for_turn()
 
+        # Get the session-specific event queue
+        queue = client.get_session_queue(session_id)
+
         # Create response tracker
         self._current_response = AsyncResponse()
         self._responses.append(self._current_response)
@@ -981,7 +1009,7 @@ class AsyncChainResponse:
                 prompt_error = e
             finally:
                 # Signal end of events
-                await client._events.put(None)
+                await queue.put(None)
                 log.debug("ACP run_prompt: signaled done")
 
         # Start prompt task in background
@@ -991,7 +1019,7 @@ class AsyncChainResponse:
         # Yield events as they arrive in real-time
         log.debug("ACP __aiter__: starting event loop")
         while True:
-            event = await client._events.get()
+            event = await queue.get()
             log.debug(f"ACP __aiter__: got event {type(event).__name__ if event else None}")
             if event is None:
                 break
