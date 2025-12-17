@@ -65,7 +65,14 @@ from .session_storage import SessionStorage
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
 from .utils import get_available_agents, get_available_models
-from .widgets import AgentSelectModal, MessageWidget, ModelSelectModal, PlanPane, SessionPromptInput, ToolUse
+from .widgets import (
+    AgentSelectModal,
+    MessageWidget,
+    ModelSelectModal,
+    PlanPane,
+    SessionPromptInput,
+    ToolUse,
+)
 
 # Default adapter
 _default_adapter = llm_adapter_litellm
@@ -270,6 +277,7 @@ class Chat(Widget):
 
     BINDINGS = [
         Binding("ctrl+l", "clear", "Clear", show=True),
+        Binding("ctrl+c", "cancel", "Interrupt", show=True),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -1013,7 +1021,7 @@ class Chat(Widget):
                         plan_pane = self.query_one("#chat-plan-pane", PlanPane)
                     except NoMatches:
                         pass
-                    
+
                     async for event in chain:
                         if self._cancel_requested:
                             break
@@ -1031,7 +1039,9 @@ class Chat(Widget):
                             # Show and update plan pane with agent planning
                             if plan_pane:
                                 if event.entries:
-                                    log.info(f"📋 Updating plan pane with {len(event.entries)} entries")
+                                    log.info(
+                                        f"📋 Updating plan pane with {len(event.entries)} entries"
+                                    )
                                     log.info(f"📋 PlanChunk entries: {event.entries}")
                                     await plan_pane.update_plan(event.entries)
                                     plan_pane.show()

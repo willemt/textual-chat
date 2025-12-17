@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Union
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import ListView, ListItem, Label, Static
+
+# JSON type for plan entries
+JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 log = logging.getLogger(__name__)
 
@@ -95,7 +98,7 @@ class PlanPane(VerticalScroll):
         except Exception as e:
             log.error(f"Failed to clear plan pane: {e}", exc_info=True)
 
-    async def update_plan(self, entries: list[dict[str, Any]]) -> None:
+    async def update_plan(self, entries: list[dict[str, JSON]]) -> None:
         """Update plan with entries.
 
         Args:
@@ -110,8 +113,12 @@ class PlanPane(VerticalScroll):
             log.info(f"📋 Cleared list_view")
 
             for i, entry in enumerate(entries):
-                status = entry.get("status", "pending")
-                content = entry.get("content", "")
+                status_raw = entry.get("status", "pending")
+                content_raw = entry.get("content", "")
+
+                # Type narrowing: ensure we have strings
+                status = str(status_raw) if status_raw else "pending"
+                content = str(content_raw) if content_raw else ""
 
                 log.info(f"📋 Processing entry {i}: status='{status}', content='{content}'")
 
@@ -134,7 +141,9 @@ class PlanPane(VerticalScroll):
                 await list_view.append(item)
                 log.info(f"📋 Appended item {i} to list_view")
 
-            log.info(f"📋 PlanPane.update_plan completed, list_view has {len(list_view.children)} items")
+            log.info(
+                f"📋 PlanPane.update_plan completed, list_view has {len(list_view.children)} items"
+            )
 
         except Exception as e:
             log.error(f"Failed to update plan pane: {e}", exc_info=True)
