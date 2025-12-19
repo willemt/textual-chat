@@ -105,9 +105,6 @@ class PermissionPrompt(Widget):
             tool_title = self.tool_call.get("title", "Unknown tool")
             yield Static(f"Tool: {tool_title}")
 
-            # Hotkey hint
-            yield Static("Press: [1] Always Accept  [2] Accept  [3] Reject", classes="hotkey-hint")
-
             # Options as buttons with hotkeys
             with Horizontal():
                 # Determine button variants and labels based on common permission patterns

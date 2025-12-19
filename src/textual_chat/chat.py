@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import deque
 
 # Setup logging to file (controlled by TEXTUAL_CHAT_LOGGING_LEVEL env var)
 _log_level = os.environ.get("TEXTUAL_CHAT_LOGGING_LEVEL", "").upper()
@@ -113,6 +114,7 @@ class _ChatInput(TextArea):
         self,
         placeholder: str = "Message...",
         *,
+        title: str | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -120,10 +122,13 @@ class _ChatInput(TextArea):
         super().__init__(name=name, id=id, classes=classes)
         self.show_line_numbers = False
         self._placeholder = placeholder
+        self._title = title
 
     def on_mount(self) -> None:
-        """Set placeholder after mount."""
+        """Set placeholder and border title after mount."""
         self.placeholder = self._placeholder
+        if self._title:
+            self.border_title = self._title
 
     async def _on_key(self, event: object) -> None:
         """Handle key presses."""
@@ -242,6 +247,10 @@ class Chat(Widget):
     Chat .message.user {
         border: round $primary;
     }
+    Chat .message.user.pending {
+        border: round $warning;
+        opacity: 0.7;
+    }
     Chat .message.assistant {
         border: round $accent;
     }
@@ -340,6 +349,7 @@ class Chat(Widget):
         introspect_scope: Literal["app", "screen", "parent"] = "app",
         assistant_name: str | None = None,
         cwd: str | None = None,
+        title: str | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -364,6 +374,7 @@ class Chat(Widget):
             introspect_scope: Scope for introspection - "app", "screen", or "parent" (default "app").
             assistant_name: Override the assistant's display name (defaults to agent name from ACP or "Assistant").
             cwd: Working directory for ACP adapter (optional).
+            title: Border title for the message input widget (optional).
             **llm_kwargs: Extra args passed to LiteLLM
         """
 
@@ -386,6 +397,7 @@ class Chat(Widget):
         self._base_system = system or "You are a helpful assistant."
         self.system = self._base_system  # May be augmented by introspection
         self.placeholder = placeholder
+        self.title = title  # Border title for input widget
         self.api_key = api_key
         self.api_base = api_base
         self.temperature = temperature
@@ -419,6 +431,14 @@ class Chat(Widget):
         self._is_responding = False
         self._cancel_requested = False
         self._response_task: asyncio.Task[None] | None = None
+        self._current_user_message: str | None = (
+            None  # Track current prompt for interruption context
+        )
+
+        # Pending messages queue for messages sent while agent is responding
+        self._pending_messages: deque[tuple[str, MessageWidget | None]] = (
+            deque()
+        )  # (content, pending_widget)
 
         # Register initial tools (smart detection)
         if tools:
@@ -491,7 +511,9 @@ class Chat(Widget):
                 yield ScrollableContainer(id="chat-messages")
                 with Vertical(id="chat-input-area"):
                     yield Static("", id="chat-status")
-                    yield _ChatInput(placeholder=self.placeholder, id="chat-input")
+                    yield _ChatInput(
+                        placeholder=self.placeholder, title=self.title, id="chat-input"
+                    )
             yield PlanPane(id="chat-plan-pane")
 
     async def on_mount(self) -> None:
@@ -917,7 +939,9 @@ class Chat(Widget):
             prompt = self.query_one("#session-prompt", SessionPromptInput)
             prompt.remove()
             input_area = self.query_one("#chat-input-area")
-            input_area.mount(_ChatInput(placeholder=self.placeholder, id="chat-input"))
+            input_area.mount(
+                _ChatInput(placeholder=self.placeholder, title=self.title, id="chat-input")
+            )
         except Exception as e:
             log.exception(f"Failed to restore input: {e}")
             return
@@ -934,12 +958,14 @@ class Chat(Widget):
         self, event: PermissionPrompt.PermissionResponse
     ) -> None:
         """Handle permission response from user."""
-        log.info(f"🔐 Permission response: request_id={event.request_id}, option_id={event.option_id}")
-        
+        log.info(
+            f"🔐 Permission response: request_id={event.request_id}, option_id={event.option_id}"
+        )
+
         # Pass the response to the conversation
         if self._conversation and hasattr(self._conversation, "respond_to_permission"):
             self._conversation.respond_to_permission(event.request_id, event.option_id)
-        
+
         # Remove the permission prompt widget
         try:
             # Find and remove all permission prompts (there should only be one active)
@@ -948,14 +974,14 @@ class Chat(Widget):
                 widget.remove()
         except Exception as e:
             log.exception(f"Failed to remove permission prompt: {e}")
-        
+
         # Update status
         self._set_status("Permission granted, continuing...")
 
     async def on__chat_input_submitted(self, event: _ChatInput.Submitted) -> None:
         """Handle message submission."""
         content = event.content
-        if not content or self._is_responding:
+        if not content:
             return
 
         if self._config_error:
@@ -970,17 +996,33 @@ class Chat(Widget):
             )
             return
 
-        # Handle slash commands
+        # Handle slash commands (always process immediately, even while responding)
         if content.startswith("/"):
             await self._handle_slash_command(content)
+            return
+
+        # If agent is responding, interrupt with the new message
+        if self._is_responding:
+            await self._interrupt_with_message(content)
             return
 
         await self._send(content)
 
     async def _send(self, content: str) -> None:
         """Send a message and get a response using the adapter."""
+        # Add user message to UI and history
+        self._add_message("user", content)
+        self._message_history.append({"role": "user", "content": content})
+        self.post_message(self.Sent(content))
+
+        # Send to agent
+        await self._send_internal(content)
+
+    async def _send_internal(self, content: str) -> None:
+        """Internal method to send a prompt to the agent (without modifying UI)."""
         self._is_responding = True
         self._cancel_requested = False
+        self._current_user_message = content  # Track for potential interruption
 
         # Clear and hide plan pane for new message
         try:
@@ -989,11 +1031,6 @@ class Chat(Widget):
             plan_pane.hide()
         except NoMatches:
             pass
-
-        # Add user message to UI and history
-        self._add_message("user", content)
-        self._message_history.append({"role": "user", "content": content})
-        self.post_message(self.Sent(content))
 
         # Show responding indicator with animation
         # Use assistant name (from override or ACP agent)
@@ -1093,7 +1130,7 @@ class Chat(Widget):
                             # Display permission prompt and wait for user response
                             self._set_status("⚠️  Waiting for permission...")
                             container = self.query_one("#chat-messages", ScrollableContainer)
-                            
+
                             # Create and mount permission prompt widget
                             prompt = PermissionPrompt(
                                 request_id=event.request_id,
@@ -1102,8 +1139,8 @@ class Chat(Widget):
                             )
                             container.mount(prompt)
                             container.scroll_end(animate=False)
-                            
-                            # Note: The actual response will be handled by 
+
+                            # Note: The actual response will be handled by
                             # on_permission_prompt_permission_response event handler
                             # which will call conversation.respond_to_permission()
 
@@ -1138,10 +1175,14 @@ class Chat(Widget):
 
                     self._save_session()
 
+                    # Process next queued message if any
+                    await self._process_next_queued_message()
+
                 except asyncio.CancelledError:
+                    # User interrupted - keep partial response
                     assistant_widget.mark_complete()
-                    await assistant_widget.update_content("*Cancelled*")
-                    self._set_status("Cancelled")
+                    # Don't replace content, keep what we have so far
+                    self._set_status("⚡ Interrupted")
                 except Exception as e:
                     assistant_widget.mark_complete()
                     await assistant_widget.update_error(str(e))
@@ -1149,6 +1190,9 @@ class Chat(Widget):
                     log.exception(f"Error in background event processing: {e}")
                 finally:
                     self._is_responding = False
+                    # Process next queued message even after error/cancel
+                    if not self._cancel_requested:
+                        await self._process_next_queued_message()
 
             # Start background task and store reference
             self._response_task = asyncio.create_task(process_events_background())
@@ -1162,6 +1206,277 @@ class Chat(Widget):
             await assistant_widget.update_error(str(e))
             self._set_status(error_msg)
             log.exception(f"Error in _send setup: {e}")
+
+    async def _interrupt_with_message(self, new_message: str) -> None:
+        """Interrupt the current agent task with a new message.
+
+        For ACP adapter: Cancels the current task and sends a combined prompt with context.
+        For other adapters: Falls back to queuing behavior.
+        """
+        # Check if we're using ACP adapter with cancel support
+        if (
+            self._adapter.__name__ == "textual_chat.llm_adapter_acp"
+            and self._conversation
+            and hasattr(self._conversation, "_conn")
+            and hasattr(self._conversation, "_session_id")
+        ):
+            log.info(f"🔄 Interrupting agent with new message: {new_message[:50]}...")
+            self._set_status("⚡ Interrupting agent with new message...")
+
+            # Cancel the current task
+            self._cancel_requested = True
+            if self._response_task and not self._response_task.done():
+                self._response_task.cancel()
+
+            # Try to cancel at ACP level too
+            try:
+                if self._conversation._conn and self._conversation._session_id:
+                    await self._conversation._conn.cancel(self._conversation._session_id)
+                    log.info("✅ Sent ACP cancel notification")
+            except Exception as e:
+                log.warning(f"⚠️ Failed to send ACP cancel: {e}")
+
+            # Wait a brief moment for cancellation to take effect
+            await asyncio.sleep(0.1)
+
+            # Clear the session's event queue to remove stale events
+            if hasattr(self._conversation, "_client") and self._conversation._client:
+                session_id = self._conversation._session_id
+                if session_id:
+                    queue = self._conversation._client.get_session_queue(session_id)
+                    # Drain all pending events
+                    cleared_count = 0
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                            cleared_count += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    log.info(f"🧹 Cleared {cleared_count} stale events from session queue")
+
+            # Build context-aware prompt (internal, not shown to user)
+            original_task = self._current_user_message or "the previous task"
+            combined_prompt = f"""[Context: I was working on: "{original_task}"]
+
+[INTERRUPTION] The user has sent a new message that takes priority:
+
+{new_message}
+
+Please address this new message. If it's related to the previous task, you may continue with that context. If it's unrelated, focus on the new request."""
+
+            # Add user's actual message to UI (not the combined prompt)
+            self._add_message("user", new_message)
+            self._message_history.append({"role": "user", "content": new_message})
+            self.post_message(self.Sent(new_message))
+
+            # Send the combined prompt to agent (with context)
+            await self._send_internal(combined_prompt)
+
+        else:
+            # Fallback to queuing for non-ACP or unsupported adapters
+            log.info(
+                f"📬 Queuing message (adapter doesn't support interruption): {new_message[:50]}..."
+            )
+            pending_widget = self._add_message("user", new_message)
+            pending_widget.add_class("pending")
+            self._pending_messages.append((new_message, pending_widget))
+            self._set_status(f"Message queued ({len(self._pending_messages)} pending)...")
+
+    async def _process_next_queued_message(self) -> None:
+        """Process the next message in the queue if any."""
+        if not self._pending_messages:
+            return
+
+        # Get next message from queue
+        content, pending_widget = self._pending_messages.popleft()
+
+        log.info(f"📨 Processing queued message. Remaining in queue: {len(self._pending_messages)}")
+
+        # Remove "pending" class from the widget to show it's being processed
+        if pending_widget:
+            pending_widget.remove_class("pending")
+
+        # Update status
+        if self._pending_messages:
+            self._set_status(
+                f"Processing queued message ({len(self._pending_messages)} remaining)..."
+            )
+        else:
+            self._set_status("Processing queued message...")
+
+        # Send the queued message (this will recursively handle the queue)
+        # Note: We don't add the message to UI again since it's already there from queuing
+        await self._send_queued(content)
+
+    async def _send_queued(self, content: str) -> None:
+        """Send a message that was already added to UI when queued."""
+        self._is_responding = True
+        self._cancel_requested = False
+
+        # Clear and hide plan pane for new message
+        try:
+            plan_pane = self.query_one("#chat-plan-pane", PlanPane)
+            plan_pane.clear()
+            plan_pane.hide()
+        except NoMatches:
+            pass
+
+        # Add to message history (UI was already updated when queued)
+        self._message_history.append({"role": "user", "content": content})
+        self.post_message(self.Sent(content))
+
+        # Show responding indicator with animation
+        agent_title = self._get_assistant_title()
+        assistant_widget = self._add_message("assistant", loading=True, title=agent_title)
+        self._set_status("Responding...")
+
+        try:
+            # Guard against uninitialized conversation
+            if not self._conversation:
+                self._show_error("Conversation not initialized")
+                assistant_widget.mark_complete()
+                return
+
+            # Get tools list for adapter
+            tools = list(self._tools.values()) if self._tools else None
+
+            # Build options for caching
+            options = {"cache": self._model.is_claude} if self._model else {}
+
+            # Use adapter's chain() for automatic tool handling (event-based streaming)
+            from .events import (
+                MessageChunk,
+                PlanChunk,
+                ThoughtChunk,
+                ToolCallStart,
+                ToolCallComplete,
+                TokenUsage,
+            )
+
+            chain = self._conversation.chain(
+                content,
+                system=self.system,
+                tools=tools,
+                options=options,
+            )
+
+            # Run event processing in background task to keep UI responsive
+            full_text_container = {"text": ""}
+            tool_calls_in_progress: dict[str, tuple[str, dict]] = {}
+
+            async def process_events_background() -> None:
+                """Process events in background task."""
+                try:
+                    # Get plan pane reference
+                    plan_pane: PlanPane | None = None
+                    try:
+                        plan_pane = self.query_one("#chat-plan-pane", PlanPane)
+                    except NoMatches:
+                        pass
+
+                    async for event in chain:
+                        if self._cancel_requested:
+                            break
+
+                        # Handle different event types
+                        if isinstance(event, MessageChunk):
+                            stream = await assistant_widget.ensure_stream()
+                            await stream.write(event.text)  # type: ignore[attr-defined]
+                            full_text_container["text"] += event.text
+
+                        elif isinstance(event, ThoughtChunk):
+                            pass
+
+                        elif isinstance(event, PlanChunk):
+                            if plan_pane:
+                                if event.entries:
+                                    log.info(
+                                        f"📋 Updating plan pane with {len(event.entries)} entries"
+                                    )
+                                    log.info(f"📋 PlanChunk entries: {event.entries}")
+                                    await plan_pane.update_plan(event.entries)
+                                    plan_pane.show()
+                                else:
+                                    log.info("📋 PlanChunk has no entries - hiding plan pane")
+                                    plan_pane.hide()
+                            else:
+                                log.warning("📋 plan_pane is None!")
+
+                        elif isinstance(event, ToolCallStart):
+                            tu = ToolUse(event.name, event.arguments, self.cwd)
+                            await assistant_widget.add_tooluse(tu, event.id)
+                            self._set_status(f"Using {event.name}...")
+                            tool_calls_in_progress[event.id] = (event.name, event.arguments)
+
+                        elif isinstance(event, ToolCallComplete):
+                            assistant_widget.complete_tooluse(event.id)
+                            if event.id in tool_calls_in_progress:
+                                name, arguments = tool_calls_in_progress[event.id]
+                                self.post_message(self.ToolCalled(name, arguments, event.output))
+                                del tool_calls_in_progress[event.id]
+                            self._set_status("Responding...")
+
+                        elif isinstance(event, TokenUsage):
+                            cached = event.cached_tokens
+                            llm_log.debug(
+                                f"=== Token Usage ===\n"
+                                f"Input: {event.prompt_tokens}, Output: {event.completion_tokens}, Cached: {cached}"
+                            )
+                            if self.show_token_usage:
+                                assistant_widget.set_token_usage(
+                                    event.prompt_tokens, event.completion_tokens, cached
+                                )
+
+                    # Close the stream and mark complete
+                    if assistant_widget._stream:
+                        await assistant_widget._stream.stop()  # type: ignore[attr-defined]
+                    assistant_widget.mark_complete()
+
+                    # Scroll to bottom
+                    container = self.query_one("#chat-messages", ScrollableContainer)
+                    container.scroll_end(animate=False)
+
+                    llm_log.debug(f"=== LLM Response ===\n{full_text_container['text']}")
+                    self._set_status("")
+                    self.post_message(self.Responded(full_text_container["text"]))
+
+                    # Track assistant response in history
+                    self._message_history.append(
+                        {"role": "assistant", "content": full_text_container["text"]}
+                    )
+
+                    self._save_session()
+
+                    # Process next queued message if any
+                    await self._process_next_queued_message()
+
+                except asyncio.CancelledError:
+                    # User interrupted - keep partial response
+                    assistant_widget.mark_complete()
+                    # Don't replace content, keep what we have so far
+                    self._set_status("⚡ Interrupted")
+                except Exception as e:
+                    assistant_widget.mark_complete()
+                    await assistant_widget.update_error(str(e))
+                    self._set_status(f"Error: {e}")
+                    log.exception(f"Error in background event processing: {e}")
+                finally:
+                    self._is_responding = False
+                    # Process next queued message even after error/cancel
+                    if not self._cancel_requested:
+                        await self._process_next_queued_message()
+
+            # Start background task and store reference
+            self._response_task = asyncio.create_task(process_events_background())
+
+        except Exception as e:
+            # Handle setup errors
+            self._is_responding = False
+            assistant_widget.mark_complete()
+            error_msg = f"Error: {e}"
+            await assistant_widget.update_error(str(e))
+            self._set_status(error_msg)
+            log.exception(f"Error in _send_queued setup: {e}")
 
     async def _handle_slash_command(self, command: str) -> None:
         """Handle slash commands like /model and /agent."""
@@ -1240,6 +1555,8 @@ class Chat(Widget):
             self._conversation.clear()
         # Clear message history
         self._message_history.clear()
+        # Clear message queue
+        self._pending_messages.clear()
         # Clear stored session for ACP adapter
         if self._session_storage and self._model:
             self._session_storage.clear_session(self._model.model_id)
@@ -1252,7 +1569,7 @@ class Chat(Widget):
             # Cancel the background task if it exists
             if self._response_task and not self._response_task.done():
                 self._response_task.cancel()
-            self._set_status("Cancelling...")
+            self._set_status("⚡ Interrupted")
 
     # Convenience methods for programmatic use
 

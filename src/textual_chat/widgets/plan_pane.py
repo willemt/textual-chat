@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import ListView, ListItem, Label, Static
 
-# JSON type for plan entries
+# JSON type for plan data
 JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
 
 log = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class PlanPane(VerticalScroll):
 
     DEFAULT_CSS = """
     PlanPane {
-        width: 35%;
+        width: 28%;
         height: 100%;
         border-left: solid $primary-darken-2;
         padding: 1;
@@ -113,12 +113,12 @@ class PlanPane(VerticalScroll):
             log.info(f"📋 Cleared list_view")
 
             for i, entry in enumerate(entries):
-                status_raw = entry.get("status", "pending")
-                content_raw = entry.get("content", "")
+                status_val = entry.get("status", "pending")
+                content_val = entry.get("content", "")
 
-                # Type narrowing: ensure we have strings
-                status = str(status_raw) if status_raw else "pending"
-                content = str(content_raw) if content_raw else ""
+                # Ensure status and content are strings
+                status = str(status_val) if status_val is not None else "pending"
+                content = str(content_val) if content_val is not None else ""
 
                 log.info(f"📋 Processing entry {i}: status='{status}', content='{content}'")
 
