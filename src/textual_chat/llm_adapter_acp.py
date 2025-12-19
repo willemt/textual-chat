@@ -1028,6 +1028,19 @@ class AsyncChainResponse:
         # Get the session-specific event queue
         queue = client.get_session_queue(session_id)
 
+        # Clear any stale events from previous interrupted responses
+        cleared_count = 0
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+                cleared_count += 1
+            except asyncio.QueueEmpty:
+                break
+        if cleared_count > 0:
+            log.info(
+                f"🧹 Cleared {cleared_count} stale events from queue before starting new prompt"
+            )
+
         # Create response tracker
         self._current_response = AsyncResponse()
         self._responses.append(self._current_response)

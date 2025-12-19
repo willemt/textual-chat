@@ -1179,9 +1179,10 @@ class Chat(Widget):
                     await self._process_next_queued_message()
 
                 except asyncio.CancelledError:
+                    # User interrupted - keep partial response
                     assistant_widget.mark_complete()
-                    await assistant_widget.update_content("*Cancelled*")
-                    self._set_status("Cancelled")
+                    # Don't replace content, keep what we have so far
+                    self._set_status("⚡ Interrupted")
                 except Exception as e:
                     assistant_widget.mark_complete()
                     await assistant_widget.update_error(str(e))
@@ -1237,6 +1238,21 @@ class Chat(Widget):
 
             # Wait a brief moment for cancellation to take effect
             await asyncio.sleep(0.1)
+
+            # Clear the session's event queue to remove stale events
+            if hasattr(self._conversation, "_client") and self._conversation._client:
+                session_id = self._conversation._session_id
+                if session_id:
+                    queue = self._conversation._client.get_session_queue(session_id)
+                    # Drain all pending events
+                    cleared_count = 0
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                            cleared_count += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    log.info(f"🧹 Cleared {cleared_count} stale events from session queue")
 
             # Build context-aware prompt (internal, not shown to user)
             original_task = self._current_user_message or "the previous task"
@@ -1435,9 +1451,10 @@ Please address this new message. If it's related to the previous task, you may c
                     await self._process_next_queued_message()
 
                 except asyncio.CancelledError:
+                    # User interrupted - keep partial response
                     assistant_widget.mark_complete()
-                    await assistant_widget.update_content("*Cancelled*")
-                    self._set_status("Cancelled")
+                    # Don't replace content, keep what we have so far
+                    self._set_status("⚡ Interrupted")
                 except Exception as e:
                     assistant_widget.mark_complete()
                     await assistant_widget.update_error(str(e))
