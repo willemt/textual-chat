@@ -72,24 +72,17 @@ class ToolUseWidget(Static):
     completed: reactive[bool] = reactive(False)
 
     def __init__(self, tool_use: ToolUse, tool_call_id: str) -> None:
-        super().__init__()
+        # Render directly as Static content (no nested children)
+        super().__init__(f"○ {tool_use}", markup=False)
         self.tool_use = tool_use
         self.tool_call_id = tool_call_id
-
-    def compose(self) -> ComposeResult:
-        # Unfilled circle for running state
-        yield Static(f"○ {self.tool_use}", markup=False, id="tool-text")
 
     def watch_completed(self, completed: bool) -> None:
         """Update display when completed changes."""
         if completed:
             # Replace with filled circle
-            try:
-                text = self.query_one("#tool-text", Static)
-                text.update(f"● {self.tool_use}")
-                text.styles.color = "green"
-            except Exception:
-                pass
+            self.update(f"● {self.tool_use}")
+            self.styles.color = "green"
 
     def complete(self) -> None:
         """Mark this tool call as complete."""

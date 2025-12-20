@@ -288,7 +288,6 @@ class Chat(Widget):
     BINDINGS = [
         Binding("ctrl+l", "clear", "Clear", show=True),
         Binding("ctrl+c", "cancel", "Interrupt", show=True),
-        Binding("escape", "cancel", "Cancel", show=False),
     ]
 
     class Sent(Message):
