@@ -560,7 +560,7 @@ class Chat(Widget):
             await self._connect_mcp_servers()
 
     def _check_existing_session(self) -> None:
-        if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+        if "llm_adapter_acp" in self._adapter.__name__:
             self._session_storage = SessionStorage()
             # Check for previous session using working-directory based API
             if self._model and self._session_storage:
@@ -579,7 +579,7 @@ class Chat(Widget):
         model_id = self._model.model_id
 
         # For ACP adapter, show agent selector hint
-        if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+        if "llm_adapter_acp" in self._adapter.__name__:
             self._set_status(f"Using {model_id}. Type /agent to switch, /help for commands")
         elif self.show_model_selector:
             self._set_status(f"Using {model_id}. Type /model to switch, /help for commands")
@@ -678,7 +678,7 @@ class Chat(Widget):
 
     def action_select_agent(self) -> None:
         """Show agent selection modal (ACP adapter only)."""
-        if self._adapter.__name__ != "textual_chat.llm_adapter_acp":
+        if "llm_adapter_acp" not in self._adapter.__name__:
             return
         self._show_agent_selector()
 
@@ -858,7 +858,7 @@ class Chat(Widget):
             return
 
         # For ACP: use working-directory based API
-        if self._adapter.__name__ == "textual_chat.llm_adapter_acp" and self.cwd:
+        if "llm_adapter_acp" in self._adapter.__name__ and self.cwd:
             session_id = self._session_storage.get_session_id(self.cwd, self._model.model_id)
             log.warning(f"Found session ID from working-dir API: {session_id}")
 
@@ -913,7 +913,7 @@ class Chat(Widget):
             return
 
         # For ACP: clear working-directory based session
-        if self._adapter.__name__ == "textual_chat.llm_adapter_acp" and self.cwd:
+        if "llm_adapter_acp" in self._adapter.__name__ and self.cwd:
             self._session_storage.delete_session_id(self.cwd, self._model.model_id)
         # For LiteLLM: clear agent-based session
         else:
@@ -1485,7 +1485,7 @@ Please address this new message. If it's related to the previous task, you may c
         if cmd == "/model":
             # FIXME: ACP does allow model selection
             # Show model selector (litellm adapter only)
-            if self._adapter.__name__ == "textual_chat.llm_adapter_acp":
+            if "llm_adapter_acp" in self._adapter.__name__:
                 self.notify(
                     "Model selection not available for ACP adapter. Use /agent instead.",
                     severity="warning",
@@ -1498,7 +1498,7 @@ Please address this new message. If it's related to the previous task, you may c
 
         elif cmd == "/agent":
             # Show agent selector (ACP adapter only)
-            if self._adapter.__name__ != "textual_chat.llm_adapter_acp":
+            if "llm_adapter_acp" not in self._adapter.__name__:
                 self.notify(
                     "Agent selection only available for ACP adapter. Use /model instead.",
                     severity="warning",

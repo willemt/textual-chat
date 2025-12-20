@@ -175,6 +175,9 @@ def _detect_model() -> tuple[str | None, str | None]:
         return "groq/llama-3.1-8b-instant", "GROQ_API_KEY"
     if os.getenv("DEEPSEEK_API_KEY"):
         return "deepseek/deepseek-chat", "DEEPSEEK_API_KEY"
+    if os.getenv("ZAI_API_KEY"):
+        # Use known working model - user can select others via model selector
+        return "openai/GLM-4.5-air", "ZAI_API_KEY"
 
     # Check for Ollama
     try:
@@ -198,13 +201,30 @@ def get_async_model(
     api_base: str | None = None,
 ) -> AsyncModel:
     """Get an async model by ID, or auto-detect if not specified."""
+    source = None
     if model_id is None:
         detected, source = _detect_model()
         if detected is None:
             raise ValueError("No model configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
         model_id = detected
         log.info(f"Auto-detected model: {model_id} from {source}")
+
+    # Auto-configure credentials for Z.AI models
+    # This allows Z.AI models to work even when OPENAI_API_KEY is set
+    if os.getenv("ZAI_API_KEY") and _is_zai_model(model_id):
+        if api_key is None:
+            api_key = os.environ["ZAI_API_KEY"]
+        if api_base is None:
+            api_base = "https://api.z.ai/api/coding/paas/v4"
+
     return AsyncModel(model_id, api_key=api_key, api_base=api_base)
+
+
+def _is_zai_model(model_id: str) -> bool:
+    """Check if a model ID is a Z.AI model."""
+    # Z.AI models are GLM models accessed via openai/ prefix
+    model_lower = model_id.lower()
+    return model_lower.startswith("openai/glm-") or model_lower.startswith("glm-")
 
 
 def get_default_model() -> str:

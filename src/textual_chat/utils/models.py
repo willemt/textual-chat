@@ -68,6 +68,22 @@ def get_available_models() -> list[tuple[str, str, str]]:
             ]
         )
 
+    # Z.AI models - use litellm's openai client to list models
+    if os.getenv("ZAI_API_KEY"):
+        from litellm import OpenAI
+
+        client = OpenAI(
+            api_key=os.environ["ZAI_API_KEY"],
+            base_url="https://api.z.ai/api/coding/paas/v4",
+        )
+        for model in client.models.list():
+            model_id = model.id
+            if model_id:
+                # API returns lowercase but chat needs specific case (e.g., GLM-4.5-air)
+                model_id_fixed = model_id.replace("glm-", "GLM-")
+                display_name = model_id.replace("-", " ").title()
+                models.append((display_name, f"openai/{model_id_fixed}", "Z.AI"))
+
     return models
 
 
