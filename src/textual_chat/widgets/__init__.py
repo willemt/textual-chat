@@ -6,6 +6,7 @@ from .model_select import ModelSelectModal
 from .permission_prompt import PermissionPrompt
 from .plan_pane import PlanPane
 from .session_prompt import SessionPromptInput
+from .slash_command_autocomplete import SlashCommand, SlashCommandAutocomplete
 
 __all__ = [
     "AgentSelectModal",
@@ -14,5 +15,7 @@ __all__ = [
     "PermissionPrompt",
     "PlanPane",
     "SessionPromptInput",
+    "SlashCommand",
+    "SlashCommandAutocomplete",
     "ToolUse",
 ]

@@ -73,6 +73,8 @@ from .widgets import (
     PermissionPrompt,
     PlanPane,
     SessionPromptInput,
+    SlashCommand,
+    SlashCommandAutocomplete,
     ToolUse,
 )
 
@@ -564,6 +566,12 @@ class Chat(Widget):
                         placeholder=self.placeholder, title=self.title, id="chat-input"
                     )
             yield PlanPane(id="chat-plan-pane")
+
+        # Add slash command autocomplete
+        yield SlashCommandAutocomplete(
+            target="#chat-input",
+            commands=self._get_slash_commands(),
+        )
 
     async def on_mount(self) -> None:
         """Initialize model and show status on mount."""
@@ -1539,6 +1547,34 @@ Please address this new message. If it's related to the previous task, you may c
             self._set_status(error_msg)
             log.exception(f"Error in _send_queued setup: {e}")
             self.post_message(self.ProcessingFailed(str(e)))
+
+    def _get_slash_commands(self) -> list[SlashCommand]:
+        """Get the list of available slash commands for autocomplete."""
+        commands = [
+            SlashCommand(
+                name="help",
+                description="Show available slash commands",
+            ),
+        ]
+
+        # Add adapter-specific commands
+        if "llm_adapter_acp" in self._adapter.__name__:
+            commands.append(
+                SlashCommand(
+                    name="agent",
+                    description="Select a different ACP agent",
+                )
+            )
+        else:
+            if self.show_model_selector:
+                commands.append(
+                    SlashCommand(
+                        name="model",
+                        description="Select a different LLM model",
+                    )
+                )
+
+        return commands
 
     async def _handle_slash_command(self, command: str) -> None:
         """Handle slash commands like /model and /agent."""
