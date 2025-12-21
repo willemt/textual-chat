@@ -19,13 +19,18 @@ from acp import (
 from acp.interfaces import Client
 from acp.schema import (
     AudioContentBlock,
+    AuthenticateResponse,
     ClientCapabilities,
     EmbeddedResourceContentBlock,
     HttpMcpServer,
     ImageContentBlock,
     Implementation,
+    ListSessionsResponse,
+    LoadSessionResponse,
     McpServerStdio,
     ResourceContentBlock,
+    SetSessionModeResponse,
+    SetSessionModelResponse,
     SseMcpServer,
     TextContentBlock,
 )
@@ -71,10 +76,7 @@ class ToolAgent(Agent):
         # Get user text
         user_text = ""
         for block in prompt:
-            if isinstance(block, dict):
-                user_text = block.get("text", "")
-            else:
-                user_text = getattr(block, "text", "")
+            user_text = getattr(block, "text", "")
 
         # Send initial text
         await self._conn.session_update(
@@ -120,6 +122,42 @@ class ToolAgent(Agent):
         )
 
         return PromptResponse(stop_reason="end_turn")
+
+    async def authenticate(self, method_id: str, **kwargs: object) -> AuthenticateResponse | None:
+        return None
+
+    async def cancel(self, session_id: str, **kwargs: object) -> None:
+        pass
+
+    async def list_sessions(
+        self, cursor: str | None = None, cwd: str | None = None, **kwargs: object
+    ) -> ListSessionsResponse:
+        return ListSessionsResponse(sessions=[])
+
+    async def load_session(
+        self,
+        cwd: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio],
+        session_id: str,
+        **kwargs: object,
+    ) -> LoadSessionResponse | None:
+        return None
+
+    async def set_session_mode(
+        self, mode_id: str, session_id: str, **kwargs: object
+    ) -> SetSessionModeResponse | None:
+        return None
+
+    async def set_session_model(
+        self, model_id: str, session_id: str, **kwargs: object
+    ) -> SetSessionModelResponse | None:
+        return None
+
+    async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        return {}
+
+    async def ext_notification(self, method: str, params: dict[str, object]) -> None:
+        pass
 
 
 async def main() -> None:

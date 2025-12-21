@@ -17,11 +17,7 @@ That's it. See https://github.com/your/textual-chat for more.
 from textual_golden import Golden
 
 from .agent_manager import get_agent_manager
-from .chat import INLINE, SEPARATE, Chat
-
-# Advanced components (most users won't need these)
-from .db import ChatDatabase, Conversation, Message
-from .chat import get_async_model  # Re-export from chat.py (defaults to litellm)
+from .chat import INLINE, SEPARATE, Chat, get_async_model
 from .session_storage import get_session_storage
 from .widgets import MessageWidget, ToolUse
 
@@ -30,9 +26,6 @@ __all__ = [
     "Chat",
     "INLINE",
     "SEPARATE",
-    "ChatDatabase",
-    "Conversation",
-    "Message",
     "MessageWidget",
     "ToolUse",
     "Golden",
