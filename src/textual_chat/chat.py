@@ -327,6 +327,56 @@ class Chat(Widget):
             super().__init__()
             self.model = model
 
+    class ProcessingStarted(Message):
+        """Agent started processing a user message.
+
+        Fired when the agent actually begins processing,
+        after any queue handling or setup.
+        """
+
+        def __init__(self, prompt: str) -> None:
+            super().__init__()
+            self.prompt = prompt
+
+    class ProcessingCompleted(Message):
+        """Agent finished processing successfully.
+
+        Fired when agent completes its response normally.
+        """
+
+        def __init__(self, response: str) -> None:
+            super().__init__()
+            self.response = response
+
+    class ProcessingFailed(Message):
+        """Agent encountered an error during processing.
+
+        Fired when an exception or error stops processing.
+        """
+
+        def __init__(self, error: str) -> None:
+            super().__init__()
+            self.error = error
+
+    class ProcessingCancelled(Message):
+        """User cancelled the agent's processing.
+
+        Fired when user interrupts/cancels the agent.
+        """
+
+        pass
+
+    class UserInputRequested(Message):
+        """Agent needs user input to continue.
+
+        Fired when agent requires permission, confirmation,
+        or other interactive input before proceeding.
+        """
+
+        def __init__(self, request_type: str) -> None:
+            super().__init__()
+            self.request_type = request_type
+
     def __init__(
         self,
         model: str | None = None,
@@ -823,6 +873,7 @@ class Chat(Widget):
                 log.warning(f"   Created prompt widget: {prompt}")
                 input_area.mount(prompt)
                 log.warning("   Mounted prompt widget")
+                self.post_message(self.UserInputRequested("session_prompt"))
             except Exception as e:
                 log.error(f"   Failed to mount prompt: {e}")
                 raise
@@ -1022,6 +1073,7 @@ class Chat(Widget):
         self._is_responding = True
         self._cancel_requested = False
         self._current_user_message = content  # Track for potential interruption
+        self.post_message(self.ProcessingStarted(content))
 
         # Clear and hide plan pane for new message
         try:
@@ -1138,6 +1190,7 @@ class Chat(Widget):
                             )
                             container.mount(prompt)
                             container.scroll_end(animate=False)
+                            self.post_message(self.UserInputRequested("permission"))
 
                             # Note: The actual response will be handled by
                             # on_permission_prompt_permission_response event handler
@@ -1166,6 +1219,7 @@ class Chat(Widget):
                     llm_log.debug(f"=== LLM Response ===\n{full_text_container['text']}")
                     self._set_status("")
                     self.post_message(self.Responded(full_text_container["text"]))
+                    self.post_message(self.ProcessingCompleted(full_text_container["text"]))
 
                     # Track assistant response in history
                     self._message_history.append(
@@ -1182,11 +1236,13 @@ class Chat(Widget):
                     assistant_widget.mark_complete()
                     # Don't replace content, keep what we have so far
                     self._set_status("⚡ Interrupted")
+                    self.post_message(self.ProcessingCancelled())
                 except Exception as e:
                     assistant_widget.mark_complete()
                     await assistant_widget.update_error(str(e))
                     self._set_status(f"Error: {e}")
                     log.exception(f"Error in background event processing: {e}")
+                    self.post_message(self.ProcessingFailed(str(e)))
                 finally:
                     self._is_responding = False
                     # Process next queued message even after error/cancel
@@ -1205,6 +1261,7 @@ class Chat(Widget):
             await assistant_widget.update_error(str(e))
             self._set_status(error_msg)
             log.exception(f"Error in _send setup: {e}")
+            self.post_message(self.ProcessingFailed(str(e)))
 
     async def _interrupt_with_message(self, new_message: str) -> None:
         """Interrupt the current agent task with a new message.
@@ -1311,6 +1368,7 @@ Please address this new message. If it's related to the previous task, you may c
         """Send a message that was already added to UI when queued."""
         self._is_responding = True
         self._cancel_requested = False
+        self.post_message(self.ProcessingStarted(content))
 
         # Clear and hide plan pane for new message
         try:
@@ -1438,6 +1496,7 @@ Please address this new message. If it's related to the previous task, you may c
                     llm_log.debug(f"=== LLM Response ===\n{full_text_container['text']}")
                     self._set_status("")
                     self.post_message(self.Responded(full_text_container["text"]))
+                    self.post_message(self.ProcessingCompleted(full_text_container["text"]))
 
                     # Track assistant response in history
                     self._message_history.append(
@@ -1454,11 +1513,13 @@ Please address this new message. If it's related to the previous task, you may c
                     assistant_widget.mark_complete()
                     # Don't replace content, keep what we have so far
                     self._set_status("⚡ Interrupted")
+                    self.post_message(self.ProcessingCancelled())
                 except Exception as e:
                     assistant_widget.mark_complete()
                     await assistant_widget.update_error(str(e))
                     self._set_status(f"Error: {e}")
                     log.exception(f"Error in background event processing: {e}")
+                    self.post_message(self.ProcessingFailed(str(e)))
                 finally:
                     self._is_responding = False
                     # Process next queued message even after error/cancel
@@ -1476,6 +1537,7 @@ Please address this new message. If it's related to the previous task, you may c
             await assistant_widget.update_error(str(e))
             self._set_status(error_msg)
             log.exception(f"Error in _send_queued setup: {e}")
+            self.post_message(self.ProcessingFailed(str(e)))
 
     async def _handle_slash_command(self, command: str) -> None:
         """Handle slash commands like /model and /agent."""
