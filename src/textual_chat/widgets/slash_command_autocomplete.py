@@ -291,8 +291,8 @@ class SlashCommandAutocomplete(Widget):
         dropdown = self.option_list
         width, height = dropdown.outer_size
 
-        # Position dropdown above the cursor
-        x, y, _width, _height = Region(x - 1, y - height, width, height).constrain(
+        # Position dropdown above the cursor, offset by 2 to clear the message box border
+        x, y, _width, _height = Region(x - 1, y - height - 2, width, height).constrain(
             "inside",
             "none",
             Spacing.all(0),
