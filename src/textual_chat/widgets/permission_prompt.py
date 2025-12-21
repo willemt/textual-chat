@@ -91,6 +91,7 @@ class PermissionPrompt(Widget):
         self.request_id = request_id
         self.tool_call = tool_call
         self.options = options
+        self.border_title = "Permission Request"
 
     def on_mount(self) -> None:
         """Focus the widget when mounted so it can receive key events."""
@@ -98,9 +99,6 @@ class PermissionPrompt(Widget):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            # Title
-            yield Label("🔐 Permission Request")
-
             # Tool call details
             tool_title = self.tool_call.get("title", "Unknown tool")
             yield Static(f"Tool: {tool_title}")
