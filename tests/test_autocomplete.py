@@ -55,15 +55,15 @@ class TestSlashCommandAutocomplete:
 class TestChatSlashCommands:
     """Tests for Chat widget slash command integration."""
 
-    def test_chat_has_get_slash_commands(self) -> None:
-        """Chat widget has _get_slash_commands method."""
+    def test_chat_has_slash_commands_manager(self) -> None:
+        """Chat widget has slash_commands manager."""
         chat = Chat()
-        assert hasattr(chat, "_get_slash_commands")
+        assert hasattr(chat, "slash_commands")
 
-    def test_get_slash_commands_returns_list(self) -> None:
-        """_get_slash_commands returns a list of SlashCommand objects."""
+    def test_slash_commands_returns_list(self) -> None:
+        """slash_commands.list() returns a list of SlashCommand objects."""
         chat = Chat()
-        commands = chat._get_slash_commands()
+        commands = chat.slash_commands.list()
         assert isinstance(commands, list)
         assert len(commands) > 0
         assert all(isinstance(cmd, SlashCommand) for cmd in commands)
@@ -71,7 +71,7 @@ class TestChatSlashCommands:
     def test_slash_commands_have_required_fields(self) -> None:
         """Each slash command has name and description."""
         chat = Chat()
-        commands = chat._get_slash_commands()
+        commands = chat.slash_commands.list()
         for cmd in commands:
             assert cmd.name, f"Command missing name: {cmd}"
             assert cmd.description, f"Command missing description: {cmd}"

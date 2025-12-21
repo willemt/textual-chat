@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 
 from textual import events, on
 from textual.app import ComposeResult
@@ -15,19 +14,7 @@ from textual.widgets import OptionList, TextArea
 from textual.widgets.option_list import Option
 from textual_autocomplete.fuzzy_search import FuzzySearch
 
-
-@dataclass
-class SlashCommand:
-    """A slash command definition."""
-
-    name: str
-    """The command name (without the leading /)."""
-
-    description: str
-    """A description of what the command does."""
-
-    handler: Callable[[], None] | None = None
-    """Optional handler function for the command."""
+from ..slash_command import SlashCommand
 
 
 class SlashCommandAutocomplete(Widget):

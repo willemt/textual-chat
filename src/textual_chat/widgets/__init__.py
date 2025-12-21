@@ -1,12 +1,13 @@
 """Widget components for textual-chat."""
 
+from ..slash_command import SlashCommand, SlashCommandManager
 from .agent_select import AgentSelectModal
 from .message import MessageWidget, ToolUse
 from .model_select import ModelSelectModal
 from .permission_prompt import PermissionPrompt
 from .plan_pane import PlanPane
 from .session_prompt import SessionPromptInput
-from .slash_command_autocomplete import SlashCommand, SlashCommandAutocomplete
+from .slash_command_autocomplete import SlashCommandAutocomplete
 
 __all__ = [
     "AgentSelectModal",
@@ -17,5 +18,6 @@ __all__ = [
     "SessionPromptInput",
     "SlashCommand",
     "SlashCommandAutocomplete",
+    "SlashCommandManager",
     "ToolUse",
 ]

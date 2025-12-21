@@ -19,6 +19,7 @@ from textual_golden import Golden
 from .agent_manager import get_agent_manager
 from .chat import INLINE, SEPARATE, Chat, get_async_model
 from .session_storage import get_session_storage
+from .slash_command import SlashCommand, SlashCommandManager
 from .widgets import MessageWidget, ToolUse
 
 __version__ = "0.1.0"
@@ -27,6 +28,8 @@ __all__ = [
     "INLINE",
     "SEPARATE",
     "MessageWidget",
+    "SlashCommand",
+    "SlashCommandManager",
     "ToolUse",
     "Golden",
     "get_async_model",

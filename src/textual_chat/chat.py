@@ -63,6 +63,7 @@ from textual.widgets.option_list import Option
 
 from . import llm_adapter_litellm
 from .session_storage import SessionStorage
+from .slash_command import SlashCommandManager, create_default_manager
 from .tools.datatable import create_datatable_tools
 from .tools.introspection import introspect_app
 from .utils import get_available_agents, get_available_models
@@ -73,7 +74,6 @@ from .widgets import (
     PermissionPrompt,
     PlanPane,
     SessionPromptInput,
-    SlashCommand,
     SlashCommandAutocomplete,
     ToolUse,
 )
@@ -491,6 +491,9 @@ class Chat(Widget):
             deque()
         )  # (content, pending_widget)
 
+        # Slash commands
+        self.slash_commands: SlashCommandManager = create_default_manager()
+
         # Register initial tools (smart detection)
         if tools:
             if isinstance(tools, dict):
@@ -570,7 +573,7 @@ class Chat(Widget):
         # Add slash command autocomplete
         yield SlashCommandAutocomplete(
             target="#chat-input",
-            commands=self._get_slash_commands(),
+            commands=self.slash_commands.list(),
         )
 
     async def on_mount(self) -> None:
@@ -1548,76 +1551,15 @@ Please address this new message. If it's related to the previous task, you may c
             log.exception(f"Error in _send_queued setup: {e}")
             self.post_message(self.ProcessingFailed(str(e)))
 
-    def _get_slash_commands(self) -> list[SlashCommand]:
-        """Get the list of available slash commands for autocomplete."""
-        commands = [
-            SlashCommand(
-                name="help",
-                description="Show available slash commands",
-            ),
-        ]
-
-        # Add adapter-specific commands
-        if "llm_adapter_acp" in self._adapter.__name__:
-            commands.append(
-                SlashCommand(
-                    name="agent",
-                    description="Select a different ACP agent",
-                )
-            )
-        else:
-            if self.show_model_selector:
-                commands.append(
-                    SlashCommand(
-                        name="model",
-                        description="Select a different LLM model",
-                    )
-                )
-
-        return commands
-
     async def _handle_slash_command(self, command: str) -> None:
-        """Handle slash commands like /model and /agent."""
-        cmd = command.strip().lower()
+        """Handle slash commands using the slash command manager."""
+        # Extract command name (strip leading / and any trailing whitespace)
+        cmd_name = command.strip().lstrip("/").split()[0].lower()
 
-        if cmd == "/model":
-            # FIXME: ACP does allow model selection
-            # Show model selector (litellm adapter only)
-            if "llm_adapter_acp" in self._adapter.__name__:
-                self.notify(
-                    "Model selection not available for ACP adapter. Use /agent instead.",
-                    severity="warning",
-                )
-                return
-            if not self.show_model_selector:
-                self.notify("Model selection is disabled.", severity="warning")
-                return
-            self.action_select_model()
-
-        elif cmd == "/agent":
-            # Show agent selector (ACP adapter only)
-            if "llm_adapter_acp" not in self._adapter.__name__:
-                self.notify(
-                    "Agent selection only available for ACP adapter. Use /model instead.",
-                    severity="warning",
-                )
-                return
-            self.action_select_agent()
-
-        elif cmd == "/help":
-            # Show help message
-            help_lines = [
-                "**Available slash commands:**",
-                "",
-                "• `/model` - Select a different LLM model (litellm adapter)",
-                "• `/agent` - Select a different ACP agent (acp adapter)",
-                "• `/help` - Show this help message",
-            ]
-            self._add_message("system", "\n".join(help_lines))
-
-        else:
+        if not await self.slash_commands.execute(cmd_name, self):
             self.notify(
-                f"Unknown command: {cmd}. Type /help for available commands.", severity="warning"
+                f"Unknown command: /{cmd_name}. Type /help for available commands.",
+                severity="warning",
             )
 
     def _save_session(self) -> None:
