@@ -1,3 +1,5 @@
+![Example](screenshot.png)
+
 # textual-chat
 
 **LLM chat for humans.** Add AI to your terminal app in a few lines of code.
