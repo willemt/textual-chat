@@ -13,7 +13,7 @@ class MyApp(App):
 MyApp().run()
 ```
 
-That's it. No configuration, no boilerplate, no PhD required.
+That's it. No configuration, no boilerplate.
 
 ## Features
 
@@ -36,11 +36,10 @@ For ACP agent support: `uv add textual-chat[acp]`
 
 ## Quick Start
 
-Set an API key (or run Ollama locally):
+Set an API key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...  # or OPENAI_API_KEY
-# Or: brew install ollama && ollama run llama3.2
 ```
 
 Then run:
@@ -112,42 +111,6 @@ Chat(
     show_token_usage=True,              # Show token counts
     show_model_selector=True,           # Allow /model switching
 )
-```
-
-## Events
-
-React to chat events in your app:
-
-```python
-def on_chat_sent(self, event: Chat.Sent):
-    log(f"User: {event.content}")
-
-def on_chat_responded(self, event: Chat.Responded):
-    log(f"Assistant: {event.content}")
-
-def on_chat_tool_called(self, event: Chat.ToolCalled):
-    log(f"Tool {event.name}: {event.result}")
-```
-
-## Model Auto-detection
-
-No model specified? We check (in order):
-
-1. `ANTHROPIC_API_KEY` → Claude Sonnet 4
-2. `OPENAI_API_KEY` → GPT-4o-mini
-3. `GITHUB_TOKEN` → GitHub Models
-4. `GEMINI_API_KEY` → Gemini Flash
-5. `GROQ_API_KEY` → Llama 3.1
-6. Ollama running → Local Llama
-
-## Development
-
-```bash
-git clone https://github.com/anthropics/textual-chat.git
-cd textual-chat
-uv sync --all-extras
-uv run pytest tests/
-uv run mypy src/textual_chat
 ```
 
 ## License

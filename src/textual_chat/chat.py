@@ -58,7 +58,7 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import DataTable, OptionList, Static, TextArea
+from textual.widgets import DataTable, OptionList, Static
 from textual.widgets.option_list import Option
 
 from . import llm_adapter_litellm
@@ -69,6 +69,7 @@ from .tools.introspection import introspect_app
 from .utils import get_available_agents, get_available_models
 from .widgets import (
     AgentSelectModal,
+    ChatInput,
     MessageWidget,
     ModelSelectModal,
     PermissionPrompt,
@@ -100,73 +101,6 @@ class ConfigurationError(Exception):
     """Raised when Chat is misconfigured."""
 
     pass
-
-
-class _ChatInput(TextArea):
-    """Multiline input with Enter to submit, Shift+Enter for newlines."""
-
-    class Submitted(Message):
-        """User submitted their message."""
-
-        def __init__(self, content: str) -> None:
-            super().__init__()
-            self.content = content
-
-    def __init__(
-        self,
-        placeholder: str = "Message...",
-        *,
-        title: str | None = None,
-        name: str | None = None,
-        id: str | None = None,
-        classes: str | None = None,
-    ) -> None:
-        super().__init__(name=name, id=id, classes=classes)
-        self.show_line_numbers = False
-        self._placeholder = placeholder
-        self._title = title
-
-    def on_mount(self) -> None:
-        """Set placeholder and border title after mount."""
-        self.placeholder = self._placeholder
-        if self._title:
-            self.border_title = self._title
-
-    async def _on_key(self, event: object) -> None:
-        """Handle key presses."""
-        # Shift+Enter (comes through as ctrl+j) - insert newline
-        if event.key == "ctrl+j":  # type: ignore[attr-defined]
-            self.insert("\n")
-            event.prevent_default()  # type: ignore[attr-defined]
-            event.stop()  # type: ignore[attr-defined]
-            return
-
-        # Enter - submit message
-        if event.key in ("enter", "ctrl+m"):  # type: ignore[attr-defined]
-            content = self.text.strip()
-            if content:
-                self.post_message(self.Submitted(content))
-                self.clear()
-            event.prevent_default()  # type: ignore[attr-defined]
-            event.stop()  # type: ignore[attr-defined]
-            return
-
-        # Page Up/Down - scroll chat messages
-        if event.key in ("pageup", "pagedown"):  # type: ignore[attr-defined]
-            try:
-                container = self.app.query_one("#chat-messages")
-                if event.key == "pageup":  # type: ignore[attr-defined]
-                    container.scroll_page_up()
-                else:
-                    container.scroll_page_down()
-                event.prevent_default()  # type: ignore[attr-defined]
-                event.stop()  # type: ignore[attr-defined]
-                return
-            except NoMatches:
-                pass
-
-        # Let TextArea handle everything else
-        await super()._on_key(event)  # type: ignore[arg-type]
 
 
 class Chat(Widget):
@@ -565,9 +499,7 @@ class Chat(Widget):
                 yield ScrollableContainer(id="chat-messages")
                 with Vertical(id="chat-input-area"):
                     yield Static("", id="chat-status")
-                    yield _ChatInput(
-                        placeholder=self.placeholder, title=self.title, id="chat-input"
-                    )
+                    yield ChatInput(placeholder=self.placeholder, title=self.title, id="chat-input")
             yield PlanPane(id="chat-plan-pane")
 
         # Add slash command autocomplete
@@ -868,7 +800,7 @@ class Chat(Widget):
 
             # Remove the text input
             try:
-                text_input = self.query_one("#chat-input", _ChatInput)
+                text_input = self.query_one("#chat-input", ChatInput)
                 log.warning(f"   Found text input: {text_input}")
                 text_input.remove()
                 log.warning("   Removed text input")
@@ -1001,7 +933,7 @@ class Chat(Widget):
             prompt.remove()
             input_area = self.query_one("#chat-input-area")
             input_area.mount(
-                _ChatInput(placeholder=self.placeholder, title=self.title, id="chat-input")
+                ChatInput(placeholder=self.placeholder, title=self.title, id="chat-input")
             )
         except Exception as e:
             log.exception(f"Failed to restore input: {e}")
@@ -1040,7 +972,7 @@ class Chat(Widget):
         self._set_status("Permission granted, continuing...")
         self.post_message(self.ProcessingStarted("Resuming after permission granted"))
 
-    async def on__chat_input_submitted(self, event: _ChatInput.Submitted) -> None:
+    async def on__chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         """Handle message submission."""
         content = event.content
         if not content:

@@ -2,6 +2,7 @@
 
 from ..slash_command import SlashCommand, SlashCommandManager
 from .agent_select import AgentSelectModal
+from .chat_input import ChatInput
 from .message import MessageWidget, ToolUse
 from .model_select import ModelSelectModal
 from .permission_prompt import PermissionPrompt
@@ -11,6 +12,7 @@ from .slash_command_autocomplete import SlashCommandAutocomplete
 
 __all__ = [
     "AgentSelectModal",
+    "ChatInput",
     "MessageWidget",
     "ModelSelectModal",
     "PermissionPrompt",
