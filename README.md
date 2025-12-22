@@ -20,10 +20,8 @@ That's it. No configuration, no boilerplate.
 ## Features
 
 - **Zero-config** - Auto-detects your LLM setup and just works
-- **Function calling** - Decorate Python functions as tools
 - **ACP agents** - Works with Claude Code, OpenCode, and custom agents
-- **Extended thinking** - See the model's reasoning process (Claude)
-- **Session persistence** - Resume conversations across restarts
+- **Function calling** - Decorate Python functions as tools
 - **Fully customizable** - It's a Textual widget, style it however you want
 
 ## Install
@@ -62,18 +60,31 @@ MyApp().run()
 
 ## Tools
 
-Give the LLM superpowers with a decorator:
+Pass any [FastMCP](https://gofastmcp.com) tool directly:
+
+```python
+from fastmcp import FastMCP
+
+mcp = FastMCP("My Tools")
+
+@mcp.tool
+def get_weather(city: str) -> str:
+    """Get the weather for a city."""
+    return f"72°F and sunny in {city}"
+
+chat = Chat(tools=mcp.tools)
+```
+
+Or use the `@chat.tool` decorator for quick one-offs:
 
 ```python
 chat = Chat()
 
 @chat.tool
-def get_weather(city: str) -> str:
-    """Get the weather for a city."""
-    return f"72°F and sunny in {city}"
+def search(query: str) -> str:
+    """Search the web."""
+    return results
 ```
-
-Type hints become the schema. Docstrings become descriptions.
 
 ## Examples
 
