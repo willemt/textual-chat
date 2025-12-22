@@ -972,7 +972,7 @@ class Chat(Widget):
         self._set_status("Permission granted, continuing...")
         self.post_message(self.ProcessingStarted("Resuming after permission granted"))
 
-    async def on__chat_input_submitted(self, event: ChatInput.Submitted) -> None:
+    async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         """Handle message submission."""
         content = event.content
         if not content:
