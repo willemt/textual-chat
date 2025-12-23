@@ -499,7 +499,18 @@ class Chat(Widget):
                 yield ScrollableContainer(id="chat-messages")
                 with Vertical(id="chat-input-area"):
                     yield Static("", id="chat-status")
-                    yield ChatInput(placeholder=self.placeholder, title=self.title, id="chat-input")
+                    # Show cwd in subtitle for ACP mode
+                    subtitle = (
+                        self.cwd
+                        if self._adapter.__name__ == "textual_chat.llm_adapter_acp"
+                        else None
+                    )
+                    yield ChatInput(
+                        placeholder=self.placeholder,
+                        title=self.title,
+                        subtitle=subtitle,
+                        id="chat-input",
+                    )
             yield PlanPane(id="chat-plan-pane")
 
         # Add slash command autocomplete
@@ -932,8 +943,17 @@ class Chat(Widget):
             prompt = self.query_one("#session-prompt", SessionPromptInput)
             prompt.remove()
             input_area = self.query_one("#chat-input-area")
+            # Show cwd in subtitle for ACP mode
+            subtitle = (
+                self.cwd if self._adapter.__name__ == "textual_chat.llm_adapter_acp" else None
+            )
             input_area.mount(
-                ChatInput(placeholder=self.placeholder, title=self.title, id="chat-input")
+                ChatInput(
+                    placeholder=self.placeholder,
+                    title=self.title,
+                    subtitle=subtitle,
+                    id="chat-input",
+                )
             )
         except Exception as e:
             log.exception(f"Failed to restore input: {e}")
