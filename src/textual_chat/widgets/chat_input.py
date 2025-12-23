@@ -22,6 +22,7 @@ class ChatInput(TextArea):
         placeholder: str = "Message...",
         *,
         title: str | None = None,
+        subtitle: str | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -30,12 +31,15 @@ class ChatInput(TextArea):
         self.show_line_numbers = False
         self._placeholder = placeholder
         self._title = title
+        self._subtitle = subtitle
 
     def on_mount(self) -> None:
         """Set placeholder and border title after mount."""
         self.placeholder = self._placeholder
         if self._title:
             self.border_title = self._title
+        if self._subtitle:
+            self.border_subtitle = self._subtitle
 
     async def _on_key(self, event: object) -> None:
         """Handle key presses."""
