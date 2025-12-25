@@ -3,8 +3,10 @@
 
 Run with:
     uv run python examples/acp_chat.py examples/tool_agent.py
+    uv run python examples/acp_chat.py micro-code
 """
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -45,8 +47,10 @@ def main() -> None:
         sys.exit(1)
 
     agent_path = sys.argv[1]
-    if not Path(agent_path).exists():
-        print(f"Error: Agent script not found: {agent_path}")
+    # Check if it's a file path or a command in PATH
+    if not Path(agent_path).exists() and not shutil.which(agent_path):
+        print(f"Error: Agent not found: {agent_path}")
+        print("Provide either a path to an agent script or a command in PATH.")
         sys.exit(1)
 
     app = ACPChatApp(agent_path)
