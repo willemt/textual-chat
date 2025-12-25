@@ -23,12 +23,12 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: [textual, types-requests]
-  # - repo: local
-  #   hooks:
-  #     - id: no-commit-to-main
-  #       name: Prevent commits to main
-  #       entry: bash
-  #       args: ['-c', 'if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then echo "❌ ERROR: Direct commits to main branch are not allowed! Please create a feature branch first."; exit 1; fi']
-  #       language: system
-  #       pass_filenames: false
-  #       always_run: true
+  - repo: local
+    hooks:
+      - id: no-commit-to-main
+        name: Prevent commits to main
+        entry: bash
+        args: ['-c', 'if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then echo "❌ ERROR: Direct commits to main branch are not allowed! Please create a feature branch first."; exit 1; fi']
+        language: system
+        pass_filenames: false
+        always_run: true

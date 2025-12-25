@@ -97,6 +97,37 @@ SEPARATE: Literal["separate"] = "separate"  # Show thinking in separate block be
 ShowThinkingMode = Literal["inline", "separate"]
 
 
+def _humanize_tokens(n: int) -> str:
+    """Convert token count to human readable format."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _make_context_bar(used: int, limit: int, width: int = 10) -> str:
+    """Create a progress bar for context usage.
+
+    Args:
+        used: Tokens used
+        limit: Context limit
+        width: Bar width in characters
+
+    Returns:
+        Progress bar string like "▓▓▓▓░░░░░░ 40%"
+    """
+    ratio = min(used / limit, 1.0) if limit > 0 else 0
+    filled = int(ratio * width)
+    empty = width - filled
+
+    # Use block characters for the bar
+    bar = "▓" * filled + "░" * empty
+    pct = int(ratio * 100)
+
+    return f"{bar} {pct}%"
+
+
 class ConfigurationError(Exception):
     """Raised when Chat is misconfigured."""
 
@@ -425,6 +456,11 @@ class Chat(Widget):
             deque()
         )  # (content, pending_widget)
 
+        # Context window tracking
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._context_limit: int | None = None  # Set from model info
+
         # Slash commands
         self.slash_commands: SlashCommandManager = create_default_manager()
 
@@ -466,6 +502,35 @@ class Chat(Widget):
             if agent_name:
                 return str(agent_name)
         return None
+
+    def _update_context_display(self) -> None:
+        """Update the border subtitle with context usage."""
+        try:
+            chat_input = self.query_one("#chat-input", ChatInput)
+        except NoMatches:
+            return
+
+        # Build subtitle parts
+        parts: list[str] = []
+
+        # Add CWD for ACP mode
+        if self._adapter.__name__ == "textual_chat.llm_adapter_acp" and self.cwd:
+            parts.append(self.cwd)
+
+        # Add context usage if we have token data and a limit
+        if self._total_prompt_tokens > 0 and self._context_limit:
+            bar = _make_context_bar(self._total_prompt_tokens, self._context_limit)
+            tokens_str = _humanize_tokens(self._total_prompt_tokens)
+            limit_str = _humanize_tokens(self._context_limit)
+            parts.append(f"{bar} {tokens_str}/{limit_str}")
+        elif self._total_prompt_tokens > 0:
+            # No limit known, just show tokens used
+            tokens_str = _humanize_tokens(self._total_prompt_tokens)
+            parts.append(f"ctx: {tokens_str}")
+
+        # Update subtitle
+        if parts:
+            chat_input.border_subtitle = " | ".join(parts)
 
     def _register_tool(self, func: Callable, name: str | None = None) -> None:
         """Register a tool function internally."""
@@ -547,6 +612,8 @@ class Chat(Widget):
                     self._conversation = self._model.conversation(cwd=self.cwd)  # type: ignore[call-arg]
                 else:
                     self._conversation = self._model.conversation()
+                # Get context window limit from model
+                self._context_limit = getattr(self._model, "context_limit", None)
                 self._update_model_status()
         except ValueError as e:
             self._config_error = str(e)
@@ -667,6 +734,10 @@ class Chat(Widget):
                     self._conversation = self._model.conversation(cwd=self.cwd)  # type: ignore[call-arg]
                 else:
                     self._conversation = self._model.conversation()
+                # Get context window limit from model and reset token tracking
+                self._context_limit = getattr(self._model, "context_limit", None)
+                self._total_prompt_tokens = 0
+                self._total_completion_tokens = 0
                 self._update_model_status()
 
                 self._check_existing_session()
@@ -717,6 +788,10 @@ class Chat(Widget):
                     self._conversation = self._model.conversation(cwd=self.cwd)  # type: ignore[call-arg]
                 else:
                     self._conversation = self._model.conversation()
+                # Get context window limit from model and reset token tracking
+                self._context_limit = getattr(self._model, "context_limit", None)
+                self._total_prompt_tokens = 0
+                self._total_completion_tokens = 0
                 self._update_model_status()
                 self.post_message(self.ModelChanged(model_id))
         except Exception as e:
@@ -1170,6 +1245,10 @@ class Chat(Widget):
                                 assistant_widget.set_token_usage(
                                     event.prompt_tokens, event.completion_tokens, cached
                                 )
+                            # Accumulate tokens and update context display
+                            self._total_prompt_tokens = event.prompt_tokens
+                            self._total_completion_tokens += event.completion_tokens
+                            self._update_context_display()
 
                     # Close the stream and mark complete
                     if assistant_widget._stream:
@@ -1447,6 +1526,10 @@ Please address this new message. If it's related to the previous task, you may c
                                 assistant_widget.set_token_usage(
                                     event.prompt_tokens, event.completion_tokens, cached
                                 )
+                            # Accumulate tokens and update context display
+                            self._total_prompt_tokens = event.prompt_tokens
+                            self._total_completion_tokens += event.completion_tokens
+                            self._update_context_display()
 
                     # Close the stream and mark complete
                     if assistant_widget._stream:
@@ -1549,6 +1632,10 @@ Please address this new message. If it's related to the previous task, you may c
         self._message_history.clear()
         # Clear message queue
         self._pending_messages.clear()
+        # Reset token tracking
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._update_context_display()
         # Clear stored session for ACP adapter
         if self._session_storage and self._model:
             self._session_storage.clear_session(self._model.model_id)

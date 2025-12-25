@@ -233,6 +233,21 @@ def get_default_model() -> str:
     return model or "gpt-4o-mini"
 
 
+def get_model_context_limit(model_id: str) -> int | None:
+    """Get the max input tokens (context window) for a model.
+
+    Returns None if the model is not found in litellm's database.
+    """
+    try:
+        model_info = litellm.model_cost.get(model_id)
+        if model_info:
+            max_tokens = model_info.get("max_input_tokens")
+            return int(max_tokens) if max_tokens is not None else None
+    except Exception:
+        pass
+    return None
+
+
 class AsyncModel:
     """Async model interface similar to llm library."""
 
@@ -248,6 +263,8 @@ class AsyncModel:
         self.api_base = api_base
         # Detect if this is a Claude model for cache control
         self.is_claude = "claude" in model_id.lower()
+        # Get context window limit
+        self.context_limit = get_model_context_limit(model_id)
 
     def conversation(self) -> AsyncConversation:
         """Create a new conversation."""
