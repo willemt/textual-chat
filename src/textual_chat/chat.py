@@ -431,6 +431,12 @@ class Chat(Widget):
         self._mcp_clients: list[object] = []
         self._mcp_tools: dict[str, tuple[object, str]] = {}  # MCP tool_name -> (client, tool_name)
 
+        # Permission request queue (only show one at a time)
+        self._permission_queue: deque[tuple[str, dict, list]] = (
+            deque()
+        )  # (request_id, tool_call, options)
+        self._permission_shown: str | None = None  # request_id of currently shown permission
+
         # Response state
         self._is_responding = False
         self._cancel_requested = False
@@ -839,6 +845,36 @@ class Chat(Widget):
         except Exception:
             pass
 
+    def _show_next_permission(self) -> None:
+        """Show the next permission request from the queue, if any."""
+        # Clear the current permission state
+        self._permission_shown = None
+
+        # Check if there are more permissions to show
+        if not self._permission_queue:
+            return
+
+        # Get next permission from queue
+        request_id, tool_call, options = self._permission_queue.popleft()
+        self._permission_shown = request_id
+
+        # Display permission prompt
+        self._set_status("⚠️  Waiting for permission...")
+        try:
+            container = self.query_one("#chat-messages", ScrollableContainer)
+            prompt = PermissionPrompt(
+                request_id=request_id,
+                tool_call=tool_call,
+                options=options,
+            )
+            container.mount(prompt)
+            container.scroll_end(animate=False)
+            self.post_message(self.UserInputRequested("permission"))
+        except Exception as e:
+            log.exception(f"Failed to show permission prompt: {e}")
+            # Try the next one if this failed
+            self._show_next_permission()
+
     def _show_error(self, error: str) -> None:
         """Show an error message in the chat."""
         container = self.query_one("#chat-messages", ScrollableContainer)
@@ -1023,18 +1059,22 @@ class Chat(Widget):
         if self._conversation and hasattr(self._conversation, "respond_to_permission"):
             self._conversation.respond_to_permission(event.request_id, event.option_id)
 
-        # Remove the permission prompt widget
+        # Remove the current permission prompt widget
         try:
-            # Find and remove all permission prompts (there should only be one active)
             container = self.query_one("#chat-messages", ScrollableContainer)
             for widget in container.query(PermissionPrompt):
-                widget.remove()
+                if widget.request_id == event.request_id:
+                    widget.remove()
+                    break
         except Exception as e:
             log.exception(f"Failed to remove permission prompt: {e}")
 
-        # Update status and notify that processing is resuming
-        self._set_status("Permission granted, continuing...")
-        self.post_message(self.ProcessingStarted("Resuming after permission granted"))
+        # Show the next queued permission, or update status
+        self._show_next_permission()
+        if self._permission_shown is None:
+            # No more permissions queued
+            self._set_status("Permission granted, continuing...")
+            self.post_message(self.ProcessingStarted("Resuming after permission granted"))
 
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         """Handle message submission."""
@@ -1187,23 +1227,29 @@ class Chat(Widget):
                             self._set_status("Responding...")
 
                         elif isinstance(event, PermissionRequest):
-                            # Display permission prompt and wait for user response
-                            self._set_status("⚠️  Waiting for permission...")
-                            container = self.query_one("#chat-messages", ScrollableContainer)
-
-                            # Create and mount permission prompt widget
-                            prompt = PermissionPrompt(
-                                request_id=event.request_id,
-                                tool_call=event.tool_call,
-                                options=event.options,
-                            )
-                            container.mount(prompt)
-                            container.scroll_end(animate=False)
-                            self.post_message(self.UserInputRequested("permission"))
-
-                            # Note: The actual response will be handled by
-                            # on_permission_prompt_permission_response event handler
-                            # which will call conversation.respond_to_permission()
+                            # Queue permission requests - only show one at a time
+                            if self._permission_shown is None:
+                                # No permission currently shown, show this one
+                                self._permission_shown = event.request_id
+                                self._set_status("⚠️  Waiting for permission...")
+                                container = self.query_one("#chat-messages", ScrollableContainer)
+                                prompt = PermissionPrompt(
+                                    request_id=event.request_id,
+                                    tool_call=event.tool_call,
+                                    options=event.options,
+                                )
+                                container.mount(prompt)
+                                container.scroll_end(animate=False)
+                                self.post_message(self.UserInputRequested("permission"))
+                            else:
+                                # Queue this permission request
+                                self._permission_queue.append(
+                                    (event.request_id, event.tool_call, event.options)
+                                )
+                                log.info(
+                                    f"📋 Queued permission request {event.request_id}, "
+                                    f"queue size: {len(self._permission_queue)}"
+                                )
 
                         elif isinstance(event, PermissionTimeout):
                             # Remove the permission prompt widget on timeout
@@ -1216,6 +1262,8 @@ class Chat(Widget):
                                         break
                             except Exception as e:
                                 log.warning(f"Failed to remove permission prompt: {e}")
+                            # Show the next queued permission
+                            self._show_next_permission()
 
                         elif isinstance(event, TokenUsage):
                             cached = event.cached_tokens
@@ -1497,17 +1545,29 @@ Please address this new message. If it's related to the previous task, you may c
                             self._set_status("Responding...")
 
                         elif isinstance(event, PermissionRequest):
-                            # Display permission prompt and wait for user response
-                            self._set_status("⚠️  Waiting for permission...")
-                            container = self.query_one("#chat-messages", ScrollableContainer)
-                            prompt = PermissionPrompt(
-                                request_id=event.request_id,
-                                tool_call=event.tool_call,
-                                options=event.options,
-                            )
-                            container.mount(prompt)
-                            container.scroll_end(animate=False)
-                            self.post_message(self.UserInputRequested("permission"))
+                            # Queue permission requests - only show one at a time
+                            if self._permission_shown is None:
+                                # No permission currently shown, show this one
+                                self._permission_shown = event.request_id
+                                self._set_status("⚠️  Waiting for permission...")
+                                container = self.query_one("#chat-messages", ScrollableContainer)
+                                prompt = PermissionPrompt(
+                                    request_id=event.request_id,
+                                    tool_call=event.tool_call,
+                                    options=event.options,
+                                )
+                                container.mount(prompt)
+                                container.scroll_end(animate=False)
+                                self.post_message(self.UserInputRequested("permission"))
+                            else:
+                                # Queue this permission request
+                                self._permission_queue.append(
+                                    (event.request_id, event.tool_call, event.options)
+                                )
+                                log.info(
+                                    f"📋 Queued permission request {event.request_id}, "
+                                    f"queue size: {len(self._permission_queue)}"
+                                )
 
                         elif isinstance(event, PermissionTimeout):
                             # Remove the permission prompt widget on timeout
@@ -1520,6 +1580,8 @@ Please address this new message. If it's related to the previous task, you may c
                                         break
                             except Exception as e:
                                 log.warning(f"Failed to remove permission prompt: {e}")
+                            # Show the next queued permission
+                            self._show_next_permission()
 
                         elif isinstance(event, TokenUsage):
                             cached = event.cached_tokens
