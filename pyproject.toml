@@ -1,6 +1,6 @@
 [project]
 name = "textual-chat"
-version = "0.1.1"
+version = "0.1.2"
 description = "LLM chat for humans. AI in your Textual app in a few lines."
 readme = "README.md"
 requires-python = ">=3.10"
