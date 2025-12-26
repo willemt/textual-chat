@@ -31,8 +31,7 @@ class ACPChatApp(App):
     def compose(self) -> ComposeResult:
         yield Chat(
             model=self.agent_path,
-            adapter="acp",  # Use ACP adapter
-            system="You are a helpful assistant.",
+            adapter="acp",
             show_token_usage=False,  # ACP doesn't provide token counts
             show_model_selector=False,  # Not applicable for ACP
         )

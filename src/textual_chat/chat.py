@@ -375,6 +375,12 @@ class Chat(Widget):
             from . import llm_adapter_acp
 
             self._adapter = llm_adapter_acp
+            # ACP doesn't support system prompts
+            if system is not None:
+                raise ValueError(
+                    "System prompts are not supported with the ACP adapter. "
+                    "ACP agents have their own built-in behavior."
+                )
         else:
             # Assume it's a module
             self._adapter = adapter  # type: ignore[assignment]
