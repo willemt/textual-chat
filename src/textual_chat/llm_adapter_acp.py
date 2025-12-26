@@ -62,6 +62,7 @@ from .agent_manager import get_agent_manager
 from .events import (
     MessageChunk,
     PermissionRequest,
+    PermissionTimeout,
     PlanChunk,
     StreamEvent,
     ThoughtChunk,
@@ -417,6 +418,8 @@ class ACPClientHandler(Client):
             log.warning(f"⏱️ Permission request {request_id} timed out, denying")
             # Clean up
             del self._permission_responses[request_id]
+            # Notify UI to remove the permission prompt
+            await queue.put(PermissionTimeout(request_id=request_id))
             # Return first option as denial (or we could raise an error)
             # For now, deny by returning the first option (could be "deny" or "allow")
             return RequestPermissionResponse(

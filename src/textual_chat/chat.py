@@ -1114,6 +1114,7 @@ class Chat(Widget):
             from .events import (
                 MessageChunk,
                 PermissionRequest,
+                PermissionTimeout,
                 PlanChunk,
                 ThoughtChunk,
                 ToolCallStart,
@@ -1203,6 +1204,18 @@ class Chat(Widget):
                             # Note: The actual response will be handled by
                             # on_permission_prompt_permission_response event handler
                             # which will call conversation.respond_to_permission()
+
+                        elif isinstance(event, PermissionTimeout):
+                            # Remove the permission prompt widget on timeout
+                            self._set_status("⚠️  Permission request timed out")
+                            try:
+                                container = self.query_one("#chat-messages", ScrollableContainer)
+                                for widget in container.query(PermissionPrompt):
+                                    if widget.request_id == event.request_id:
+                                        widget.remove()
+                                        break
+                            except Exception as e:
+                                log.warning(f"Failed to remove permission prompt: {e}")
 
                         elif isinstance(event, TokenUsage):
                             cached = event.cached_tokens
@@ -1411,6 +1424,8 @@ Please address this new message. If it's related to the previous task, you may c
             # Use adapter's chain() for automatic tool handling (event-based streaming)
             from .events import (
                 MessageChunk,
+                PermissionRequest,
+                PermissionTimeout,
                 PlanChunk,
                 ThoughtChunk,
                 ToolCallStart,
@@ -1480,6 +1495,31 @@ Please address this new message. If it's related to the previous task, you may c
                                 self.post_message(self.ToolCalled(name, arguments, event.output))
                                 del tool_calls_in_progress[event.id]
                             self._set_status("Responding...")
+
+                        elif isinstance(event, PermissionRequest):
+                            # Display permission prompt and wait for user response
+                            self._set_status("⚠️  Waiting for permission...")
+                            container = self.query_one("#chat-messages", ScrollableContainer)
+                            prompt = PermissionPrompt(
+                                request_id=event.request_id,
+                                tool_call=event.tool_call,
+                                options=event.options,
+                            )
+                            container.mount(prompt)
+                            container.scroll_end(animate=False)
+                            self.post_message(self.UserInputRequested("permission"))
+
+                        elif isinstance(event, PermissionTimeout):
+                            # Remove the permission prompt widget on timeout
+                            self._set_status("⚠️  Permission request timed out")
+                            try:
+                                container = self.query_one("#chat-messages", ScrollableContainer)
+                                for widget in container.query(PermissionPrompt):
+                                    if widget.request_id == event.request_id:
+                                        widget.remove()
+                                        break
+                            except Exception as e:
+                                log.warning(f"Failed to remove permission prompt: {e}")
 
                         elif isinstance(event, TokenUsage):
                             cached = event.cached_tokens
