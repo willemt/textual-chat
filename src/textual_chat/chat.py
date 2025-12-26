@@ -335,6 +335,7 @@ class Chat(Widget):
         assistant_name: str | None = None,
         cwd: str | None = None,
         title: str | None = None,
+        initial_messages: str | list[str] | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -360,6 +361,7 @@ class Chat(Widget):
             assistant_name: Override the assistant's display name (defaults to agent name from ACP or "Assistant").
             cwd: Working directory for ACP adapter (optional).
             title: Border title for the message input widget (optional).
+            initial_messages: Message(s) to send automatically after model/agent is ready.
             **llm_kwargs: Extra args passed to LiteLLM
         """
 
@@ -395,6 +397,14 @@ class Chat(Widget):
         self.assistant_name = assistant_name  # Override for assistant display name
         self.cwd = cwd  # Working directory for ACP adapter
         self.llm_kwargs = llm_kwargs
+
+        # Normalize initial_messages to a list
+        if initial_messages is None:
+            self._initial_messages: list[str] = []
+        elif isinstance(initial_messages, str):
+            self._initial_messages = [initial_messages]
+        else:
+            self._initial_messages = list(initial_messages)
 
         # Adapter state (initialized in on_mount)
         self._model: AsyncModel | None = None
@@ -562,6 +572,22 @@ class Chat(Widget):
         if self._mcp_servers:
             await self._connect_mcp_servers()
 
+        # Send initial messages if model is ready and no session prompt pending
+        if self._model and not self._pending_session_prompt:
+            await self._send_initial_messages()
+
+    async def _send_initial_messages(self) -> None:
+        """Send queued initial messages."""
+        if not self._initial_messages:
+            return
+
+        # Send each initial message
+        for message in self._initial_messages:
+            await self._send(message)
+
+        # Clear the list so they're not sent again
+        self._initial_messages.clear()
+
     def _check_existing_session(self) -> None:
         if "llm_adapter_acp" in self._adapter.__name__:
             self._session_storage = SessionStorage()
@@ -675,6 +701,10 @@ class Chat(Widget):
                 if self.introspect:
                     self._perform_introspection()
 
+                # Send initial messages if no session prompt pending
+                if not self._pending_session_prompt:
+                    asyncio.create_task(self._send_initial_messages())
+
         except Exception as e:
             self._set_status(f"Failed to initialize agent: {e}")
             log.exception(f"Failed to initialize agent: {e}")
@@ -719,6 +749,8 @@ class Chat(Widget):
                     self._conversation = self._model.conversation()
                 self._update_model_status()
                 self.post_message(self.ModelChanged(model_id))
+                # Send initial messages
+                asyncio.create_task(self._send_initial_messages())
         except Exception as e:
             self._set_status(f"Failed: {e}")
 
@@ -966,6 +998,9 @@ class Chat(Widget):
             await self._resume_session()
         else:
             self._init_session()
+
+        # Send initial messages now that session is ready
+        await self._send_initial_messages()
 
     def on_permission_prompt_permission_response(
         self, event: PermissionPrompt.PermissionResponse
