@@ -395,7 +395,10 @@ class Chat(Widget):
         self.introspect = introspect
         self.introspect_scope = introspect_scope
         self.assistant_name = assistant_name  # Override for assistant display name
-        self.cwd = cwd  # Working directory for ACP adapter
+        if cwd is None:
+            self.cwd = os.getcwd()
+        else:
+            self.cwd = cwd
         self.llm_kwargs = llm_kwargs
 
         # Normalize initial_messages to a list
