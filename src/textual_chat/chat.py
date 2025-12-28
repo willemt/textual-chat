@@ -313,6 +313,17 @@ class Chat(Widget):
             super().__init__()
             self.request_type = request_type
 
+    class PlanUpdated(Message):
+        """Emitted when the agent's plan is updated.
+
+        Fired when the agent updates its plan entries, allowing applications
+        to track progress based on completed, in_progress, and pending tasks.
+        """
+
+        def __init__(self, entries: list[dict]) -> None:
+            super().__init__()
+            self.entries = entries
+
     def __init__(
         self,
         model: str | None = None,
@@ -1197,6 +1208,10 @@ class Chat(Widget):
                             pass  # Could show thinking text in future
 
                         elif isinstance(event, PlanChunk):
+                            # Post message for applications to track progress
+                            if event.entries:
+                                self.post_message(self.PlanUpdated(event.entries))
+
                             # Show and update plan pane with agent planning
                             if plan_pane:
                                 if event.entries:
@@ -1516,6 +1531,11 @@ Please address this new message. If it's related to the previous task, you may c
                             pass
 
                         elif isinstance(event, PlanChunk):
+                            # Post message for applications to track progress
+                            if event.entries:
+                                self.post_message(self.PlanUpdated(event.entries))
+
+                            # Show and update plan pane with agent planning
                             if plan_pane:
                                 if event.entries:
                                     log.info(
