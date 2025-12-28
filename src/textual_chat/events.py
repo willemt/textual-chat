@@ -79,6 +79,13 @@ class PermissionRequest:
     options: list[dict[str, JSON]]  # List of PermissionOption as dicts
 
 
+@dataclass
+class PermissionTimeout:
+    """Permission request timed out."""
+
+    request_id: str
+
+
 # Union type for all possible events
 StreamEvent = (
     MessageChunk
@@ -89,4 +96,5 @@ StreamEvent = (
     | ToolCallComplete
     | TokenUsage
     | PermissionRequest
+    | PermissionTimeout
 )
