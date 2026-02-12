@@ -879,7 +879,7 @@ class Chat(Widget):
                 options=options,
             )
             container.mount(prompt)
-            container.scroll_end(animate=False)
+            self.call_later(lambda: container.scroll_end(animate=False))
             self.post_message(self.UserInputRequested("permission"))
         except Exception as e:
             log.exception(f"Failed to show permission prompt: {e}")
@@ -1254,7 +1254,7 @@ class Chat(Widget):
                                     options=event.options,
                                 )
                                 container.mount(prompt)
-                                container.scroll_end(animate=False)
+                                self.call_later(lambda c=container: c.scroll_end(animate=False))
                                 self.post_message(self.UserInputRequested("permission"))
                             else:
                                 # Queue this permission request
@@ -1577,7 +1577,7 @@ Please address this new message. If it's related to the previous task, you may c
                                     options=event.options,
                                 )
                                 container.mount(prompt)
-                                container.scroll_end(animate=False)
+                                self.call_later(lambda c=container: c.scroll_end(animate=False))
                                 self.post_message(self.UserInputRequested("permission"))
                             else:
                                 # Queue this permission request
