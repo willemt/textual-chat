@@ -78,6 +78,7 @@ from .events import (
     PlanChunk,
     StreamEvent,
     ThoughtChunk,
+    TokenUsage,
     ToolCallComplete,
     ToolCallProgress,
     ToolCallStart,
@@ -1246,8 +1247,30 @@ class AsyncChainResponse:
             log.warning(f"🚀 SENDING PROMPT TO AGENT: {repr(self._prompt)}")
             log.warning(f"   Session ID: {session_id}")
             try:
-                await conn.prompt(session_id=session_id, prompt=[text_block(self._prompt)])
+                response = await conn.prompt(
+                    session_id=session_id, prompt=[text_block(self._prompt)]
+                )
                 log.debug("ACP run_prompt: prompt completed")
+
+                # Extract token usage from PromptResponse if available
+                if response and response.usage:
+                    usage = response.usage
+                    log.info(
+                        f"📊 TokenUsage from PromptResponse: "
+                        f"in={usage.input_tokens} out={usage.output_tokens} "
+                        f"total={usage.total_tokens}"
+                    )
+                    await queue.put(
+                        TokenUsage(
+                            prompt_tokens=usage.input_tokens,
+                            completion_tokens=usage.output_tokens,
+                            cached_tokens=usage.cached_read_tokens or 0,
+                            total_tokens=usage.total_tokens,
+                            thought_tokens=usage.thought_tokens,
+                            cached_read_tokens=usage.cached_read_tokens,
+                            cached_write_tokens=usage.cached_write_tokens,
+                        )
+                    )
             except Exception as e:
                 log.debug(f"ACP run_prompt: error {e}")
                 prompt_error = e
