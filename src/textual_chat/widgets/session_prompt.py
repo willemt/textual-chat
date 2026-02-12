@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from textual import events
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Button, Label, Static
+from textual.widgets import Button, Label
 
 
 class SessionPromptInput(Widget):

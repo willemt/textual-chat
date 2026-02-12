@@ -123,6 +123,10 @@ class MessageWidget(Widget):
         self._current_markdown: Markdown | None = None
         self._stream: object | None = None  # Markdown.Stream type not in public API
         self._after_tooluse: bool = False  # Track if next markdown should have margin-top
+        # Usage tracking for border subtitle
+        self._token_usage: tuple[int, int, int] | None = None  # (prompt, completion, cached)
+        self._context_usage: tuple[int, int] | None = None  # (used, size)
+        self._cost: tuple[float, str] | None = None  # (amount, currency)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="message-content"):
@@ -239,12 +243,57 @@ class MessageWidget(Widget):
         """Mark the message as complete (removes loading indicator)."""
         self._remove_loading()
 
+    def _update_usage_subtitle(self) -> None:
+        """Update border subtitle with combined token and context usage."""
+        parts: list[str] = []
+
+        # Token usage: ↑3k ↓1.5k ⚡500
+        if self._token_usage:
+            prompt, completion, cached = self._token_usage
+            token_part = f"↑{_humanize_tokens(prompt)} ↓{_humanize_tokens(completion)}"
+            if cached:
+                token_part += f" ⚡{_humanize_tokens(cached)}"
+            parts.append(token_part)
+
+        # Context usage: 45% or 95%⚠
+        if self._context_usage:
+            used, size = self._context_usage
+            if size > 0:
+                pct = (used / size) * 100
+                if pct >= 95:
+                    parts.append(f"[red]{pct:.0f}%⚠[/red]")
+                elif pct >= 75:
+                    parts.append(f"[yellow]{pct:.0f}%[/yellow]")
+                else:
+                    parts.append(f"{pct:.0f}%")
+
+        # Cost: $0.05
+        if self._cost:
+            amount, currency = self._cost
+            if currency == "USD":
+                parts.append(f"${amount:.2f}")
+            else:
+                parts.append(f"{amount:.2f} {currency}")
+
+        self.border_subtitle = " · ".join(parts) if parts else ""
+
     def set_token_usage(self, prompt: int, completion: int, cached: int = 0) -> None:
         """Set token usage in border subtitle."""
-        subtitle = f"↑{_humanize_tokens(prompt)} ↓{_humanize_tokens(completion)}"
-        if cached:
-            subtitle += f" ⚡{_humanize_tokens(cached)}"
-        self.border_subtitle = subtitle
+        self._token_usage = (prompt, completion, cached)
+        self._update_usage_subtitle()
+
+    def set_context_usage(
+        self,
+        used: int,
+        size: int,
+        cost_amount: float | None = None,
+        cost_currency: str | None = None,
+    ) -> None:
+        """Set context window usage and optional cost in border subtitle."""
+        self._context_usage = (used, size)
+        if cost_amount is not None and cost_currency is not None:
+            self._cost = (cost_amount, cost_currency)
+        self._update_usage_subtitle()
 
     def show_thinking_animated(self, thinking_text: str) -> None:
         """Show animated thinking indicator."""

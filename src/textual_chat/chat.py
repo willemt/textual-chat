@@ -46,7 +46,7 @@ if os.environ.get("TEXTUAL_CHAT_LOG_LLM"):
 
 import types
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Literal, Union
+from typing import Literal, Union
 
 from textual.app import ComposeResult
 
@@ -56,10 +56,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import DataTable, OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets import DataTable, Static
 
 from . import llm_adapter_litellm
 from .session_storage import SessionStorage
@@ -323,6 +321,41 @@ class Chat(Widget):
         def __init__(self, entries: list[dict]) -> None:
             super().__init__()
             self.entries = entries
+
+    class UsageUpdated(Message):
+        """Emitted when context window usage is updated.
+
+        Fired when the agent reports context window utilization and optional cost.
+        Applications can use this to:
+        - Display context window usage percentage
+        - Warn users when context is filling up
+        - Track cumulative session cost
+        """
+
+        def __init__(
+            self,
+            used: int,
+            size: int,
+            cost_amount: float | None = None,
+            cost_currency: str | None = None,
+        ) -> None:
+            super().__init__()
+            self.used = used
+            self.size = size
+            self.cost_amount = cost_amount
+            self.cost_currency = cost_currency
+
+        @property
+        def remaining(self) -> int:
+            """Remaining tokens in context window."""
+            return self.size - self.used
+
+        @property
+        def percentage(self) -> float:
+            """Percentage of context window used."""
+            if self.size <= 0:
+                return 0.0
+            return (self.used / self.size) * 100
 
     def __init__(
         self,
@@ -1168,9 +1201,10 @@ class Chat(Widget):
                 PermissionTimeout,
                 PlanChunk,
                 ThoughtChunk,
-                ToolCallStart,
-                ToolCallComplete,
                 TokenUsage,
+                ToolCallComplete,
+                ToolCallStart,
+                UsageUpdate,
             )
 
             chain = self._conversation.chain(
@@ -1290,6 +1324,36 @@ class Chat(Widget):
                                 assistant_widget.set_token_usage(
                                     event.prompt_tokens, event.completion_tokens, cached
                                 )
+
+                        elif isinstance(event, UsageUpdate):
+                            # Context window and cost update from agent
+                            pct = event.percentage
+                            llm_log.debug(
+                                f"=== Context Update ===\n"
+                                f"Used: {event.used}/{event.size} ({pct:.1f}%)"
+                                + (
+                                    f", Cost: {event.cost.amount} {event.cost.currency}"
+                                    if event.cost
+                                    else ""
+                                )
+                            )
+                            # Display context usage in message widget (same as token usage)
+                            if self.show_token_usage:
+                                assistant_widget.set_context_usage(
+                                    event.used,
+                                    event.size,
+                                    event.cost.amount if event.cost else None,
+                                    event.cost.currency if event.cost else None,
+                                )
+                            # Post message for application to handle
+                            self.post_message(
+                                self.UsageUpdated(
+                                    used=event.used,
+                                    size=event.size,
+                                    cost_amount=event.cost.amount if event.cost else None,
+                                    cost_currency=event.cost.currency if event.cost else None,
+                                )
+                            )
 
                     # Close the stream and mark complete
                     if assistant_widget._stream:
@@ -1491,9 +1555,10 @@ Please address this new message. If it's related to the previous task, you may c
                 PermissionTimeout,
                 PlanChunk,
                 ThoughtChunk,
-                ToolCallStart,
-                ToolCallComplete,
                 TokenUsage,
+                ToolCallComplete,
+                ToolCallStart,
+                UsageUpdate,
             )
 
             chain = self._conversation.chain(
@@ -1613,6 +1678,36 @@ Please address this new message. If it's related to the previous task, you may c
                                 assistant_widget.set_token_usage(
                                     event.prompt_tokens, event.completion_tokens, cached
                                 )
+
+                        elif isinstance(event, UsageUpdate):
+                            # Context window and cost update from agent
+                            pct = event.percentage
+                            llm_log.debug(
+                                f"=== Context Update ===\n"
+                                f"Used: {event.used}/{event.size} ({pct:.1f}%)"
+                                + (
+                                    f", Cost: {event.cost.amount} {event.cost.currency}"
+                                    if event.cost
+                                    else ""
+                                )
+                            )
+                            # Display context usage in message widget (same as token usage)
+                            if self.show_token_usage:
+                                assistant_widget.set_context_usage(
+                                    event.used,
+                                    event.size,
+                                    event.cost.amount if event.cost else None,
+                                    event.cost.currency if event.cost else None,
+                                )
+                            # Post message for application to handle
+                            self.post_message(
+                                self.UsageUpdated(
+                                    used=event.used,
+                                    size=event.size,
+                                    cost_amount=event.cost.amount if event.cost else None,
+                                    cost_currency=event.cost.currency if event.cost else None,
+                                )
+                            )
 
                     # Close the stream and mark complete
                     if assistant_widget._stream:

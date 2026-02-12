@@ -24,7 +24,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import singledispatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, Union, cast
+from typing import TypedDict, Union, cast
 
 # JSON type for proper typing of JSON values
 JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
@@ -33,7 +33,6 @@ from acp import Client, text_block
 from acp.client.connection import ClientSideConnection
 from acp.interfaces import Agent
 from acp.schema import (
-    InitializeResponse,
     AgentMessageChunk,
     AgentPlanUpdate,
     AgentThoughtChunk,
@@ -42,6 +41,7 @@ from acp.schema import (
     CreateTerminalResponse,
     CurrentModeUpdate,
     EnvVariable,
+    InitializeResponse,
     KillTerminalCommandResponse,
     PermissionOption,
     ReadTextFileResponse,
@@ -50,16 +50,28 @@ from acp.schema import (
     TerminalExitStatus,
     TerminalOutputResponse,
     TextContentBlock,
-    ToolCallProgress as ACPToolCallProgress,
-    ToolCallStart as ACPToolCallStart,
     ToolCallUpdate,
     UserMessageChunk,
     WaitForTerminalExitResponse,
     WriteTextFileResponse,
 )
+from acp.schema import (
+    ToolCallProgress as ACPToolCallProgress,
+)
+from acp.schema import (
+    ToolCallStart as ACPToolCallStart,
+)
+from acp.schema import (
+    UsageUpdate as ACPSchemaUsageUpdate,
+)
+from acp.schema import (
+    ConfigOptionUpdate,
+    SessionInfoUpdate,
+)
 
 from .agent_manager import get_agent_manager
 from .events import (
+    Cost,
     MessageChunk,
     PermissionRequest,
     PermissionTimeout,
@@ -67,8 +79,9 @@ from .events import (
     StreamEvent,
     ThoughtChunk,
     ToolCallComplete,
-    ToolCallStart,
     ToolCallProgress,
+    ToolCallStart,
+    UsageUpdate,
 )
 from .session_storage import get_session_storage
 
@@ -97,7 +110,35 @@ def _is_acp_client_capability(update: ACPToolCallStart | ACPToolCallProgress) ->
 # Singledispatch handlers for session updates
 @singledispatch
 async def _handle_update(update: object, client: object, session_id: str) -> None:
-    """Default handler for unknown update types."""
+    """Default handler for unknown update types.
+
+    Also handles dynamically created types like UsageUpdate from newer ACP schemas.
+    """
+    # Check if this is a usage_update (handles dynamically created UsageUpdate class)
+    session_update_type = getattr(update, "session_update", None)
+    if session_update_type == "usage_update":
+        # Extract usage data from the object
+        used = getattr(update, "used", 0)
+        size = getattr(update, "size", 0)
+        cost_obj = getattr(update, "cost", None)
+
+        handler = cast("ACPClientHandler", client)
+        queue = handler.get_session_queue(session_id)
+
+        log.info(
+            f"📊 UsageUpdate: {used}/{size} tokens "
+            f"({used / size * 100:.1f}% used)"
+            + (f", cost: {cost_obj.amount} {cost_obj.currency}" if cost_obj else "")
+        )
+
+        # Convert to event
+        cost = None
+        if cost_obj and hasattr(cost_obj, "amount") and hasattr(cost_obj, "currency"):
+            cost = Cost(amount=cost_obj.amount, currency=cost_obj.currency)
+
+        await queue.put(UsageUpdate(used=used, size=size, cost=cost))
+        return
+
     log.warning(f"⚠️  Unhandled update type: {type(update).__name__} - {update}")
 
 
@@ -221,10 +262,157 @@ async def _handle_tool_call(
             await queue.put(ToolCallComplete(id=tool_call_id, output=output))
 
 
+@_handle_update.register(ACPSchemaUsageUpdate)
+async def _handle_schema_usage_update(
+    update: ACPSchemaUsageUpdate, client: object, session_id: str
+) -> None:
+    """Handle usage update from ACP schema - context window and cost."""
+    handler = cast("ACPClientHandler", client)
+    queue = handler.get_session_queue(session_id)
+
+    log.info(
+        f"📊 UsageUpdate: {update.used}/{update.size} tokens "
+        f"({update.used / update.size * 100:.1f}% used)"
+        + (f", cost: {update.cost.amount} {update.cost.currency}" if update.cost else "")
+    )
+
+    # Convert to event
+    cost = None
+    if update.cost:
+        cost = Cost(amount=update.cost.amount, currency=update.cost.currency)
+
+    await queue.put(UsageUpdate(used=update.used, size=update.size, cost=cost))
+
+
 class CacheDetails(TypedDict, total=False):
     """Cache-related token details (not used in ACP but kept for interface compat)."""
 
     cached_tokens: int
+
+
+# ============================================================================
+# Local ACP types for session/update usage_update notification
+# These are defined locally since the ACP schema may not have them yet.
+# See: https://agentclientprotocol.com/rfds/0002-session-usage
+# ============================================================================
+
+
+def _json_to_int(value: JSON, default: int = 0) -> int:
+    """Safely convert a JSON value to int."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _json_to_float(value: JSON, default: float = 0.0) -> float:
+    """Safely convert a JSON value to float."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _json_to_str(value: JSON, default: str = "") -> str:
+    """Safely convert a JSON value to str."""
+    if value is None:
+        return default
+    return str(value)
+
+
+@dataclass
+class ACPCost:
+    """Cost information for cumulative session cost."""
+
+    amount: float
+    currency: str  # ISO 4217 currency code
+
+    @classmethod
+    def from_dict(cls, data: dict[str, JSON]) -> "ACPCost":
+        """Parse from a dictionary."""
+        return cls(
+            amount=_json_to_float(data.get("amount"), 0.0),
+            currency=_json_to_str(data.get("currency"), "USD"),
+        )
+
+
+@dataclass
+class ACPUsageUpdate:
+    """Usage update notification sent via session/update.
+
+    Reports context window utilization and optional cumulative session cost.
+    """
+
+    session_update: str  # Should be "usage_update"
+    used: int  # Tokens currently in context
+    size: int  # Total context window size in tokens
+    cost: ACPCost | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, JSON]) -> "ACPUsageUpdate":
+        """Parse from a dictionary (handles both camelCase and snake_case)."""
+        session_update = _json_to_str(data.get("sessionUpdate") or data.get("session_update"), "")
+        used = _json_to_int(data.get("used"), 0)
+        size = _json_to_int(data.get("size"), 0)
+        cost_data = data.get("cost")
+        cost = ACPCost.from_dict(cost_data) if isinstance(cost_data, dict) else None
+        return cls(session_update=session_update, used=used, size=size, cost=cost)
+
+
+@dataclass
+class ACPPromptUsage:
+    """Token usage information in PromptResponse."""
+
+    total_tokens: int
+    input_tokens: int
+    output_tokens: int
+    thought_tokens: int | None = None
+    cached_read_tokens: int | None = None
+    cached_write_tokens: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, JSON]) -> "ACPPromptUsage":
+        """Parse from a dictionary."""
+        thought = data.get("thought_tokens")
+        cached_read = data.get("cached_read_tokens")
+        cached_write = data.get("cached_write_tokens")
+        return cls(
+            total_tokens=_json_to_int(data.get("total_tokens"), 0),
+            input_tokens=_json_to_int(data.get("input_tokens"), 0),
+            output_tokens=_json_to_int(data.get("output_tokens"), 0),
+            thought_tokens=_json_to_int(thought) if thought is not None else None,
+            cached_read_tokens=_json_to_int(cached_read) if cached_read is not None else None,
+            cached_write_tokens=_json_to_int(cached_write) if cached_write is not None else None,
+        )
+
+
+# Register the handler for usage_update
+@_handle_update.register(ACPUsageUpdate)
+async def _handle_usage_update(update: ACPUsageUpdate, client: object, session_id: str) -> None:
+    """Handle usage update notifications - context window and cost."""
+    handler = cast("ACPClientHandler", client)
+    queue = handler.get_session_queue(session_id)
+
+    log.info(
+        f"📊 UsageUpdate: {update.used}/{update.size} tokens "
+        f"({update.used / update.size * 100:.1f}%)"
+        + (f", cost: {update.cost.amount} {update.cost.currency}" if update.cost else "")
+    )
+
+    # Convert to event
+    cost = None
+    if update.cost:
+        cost = Cost(amount=update.cost.amount, currency=update.cost.currency)
+
+    await queue.put(UsageUpdate(used=update.used, size=update.size, cost=cost))
 
 
 @dataclass
@@ -291,8 +479,6 @@ class ACPClientHandler(Client):
     """Handles ACP client callbacks for session updates."""
 
     def __init__(self) -> None:
-        from .events import StreamEvent
-
         self._session_events: dict[str, asyncio.Queue[StreamEvent | None]] = (
             {}
         )  # session_id -> queue
@@ -306,16 +492,14 @@ class ACPClientHandler(Client):
 
     def register_session(self, session_id: str, cwd: str) -> None:
         """Register a session's working directory and create its event queue."""
-        from .events import StreamEvent
 
         self._sessions[session_id] = cwd
         if session_id not in self._session_events:
             self._session_events[session_id] = asyncio.Queue()
         log.debug(f"Registered session {session_id} with cwd: {cwd}")
 
-    def get_session_queue(self, session_id: str) -> asyncio.Queue["StreamEvent | None"]:
+    def get_session_queue(self, session_id: str) -> asyncio.Queue[StreamEvent | None]:
         """Get the event queue for a session."""
-        from .events import StreamEvent
 
         if session_id not in self._session_events:
             self._session_events[session_id] = asyncio.Queue()
@@ -348,6 +532,9 @@ class ACPClientHandler(Client):
             | AgentPlanUpdate
             | AvailableCommandsUpdate
             | CurrentModeUpdate
+            | ConfigOptionUpdate
+            | SessionInfoUpdate
+            | ACPSchemaUsageUpdate
         ),
         **kwargs: JSON,
     ) -> None:
@@ -614,7 +801,7 @@ class ACPClientHandler(Client):
     ) -> TerminalOutputResponse:
         """Get output from terminal."""
         from acp import RequestError
-        from acp.schema import TerminalExitStatus, TerminalOutputResponse
+        from acp.schema import TerminalOutputResponse
 
         process = self._terminals.get(terminal_id)
         if not process:
@@ -1017,7 +1204,7 @@ class AsyncChainResponse:
 
     async def __aiter__(self) -> AsyncGenerator[StreamEvent, None]:
         """Iterate over events from the agent."""
-        from .events import MessageChunk, StreamEvent
+        from .events import MessageChunk
 
         self._iterated = True
 

@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Union
 
-from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import ListView, ListItem, Label, Static
+from textual.widgets import Label, ListItem, ListView, Static
 
 # JSON type for plan data
 JSON = Union[dict[str, "JSON"], list["JSON"], str, int, float, bool, None]
@@ -110,7 +109,7 @@ class PlanPane(VerticalScroll):
 
             list_view = self.query_one("#plan-list", ListView)
             list_view.clear()
-            log.info(f"📋 Cleared list_view")
+            log.info("📋 Cleared list_view")
 
             for i, entry in enumerate(entries):
                 status_val = entry.get("status", "pending")

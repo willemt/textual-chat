@@ -62,11 +62,55 @@ class ToolCallComplete:
 
 @dataclass
 class TokenUsage:
-    """Token usage information."""
+    """Token usage information from PromptResponse.
+
+    Per-turn token breakdown as specified in the ACP usage tracking RFC.
+    """
 
     prompt_tokens: int
     completion_tokens: int
     cached_tokens: int = 0
+    # Extended fields from ACP RFC
+    total_tokens: int | None = None
+    thought_tokens: int | None = None
+    cached_read_tokens: int | None = None
+    cached_write_tokens: int | None = None
+
+
+@dataclass
+class Cost:
+    """Cost information for a session."""
+
+    amount: float
+    currency: str  # ISO 4217 currency code (e.g., "USD", "EUR")
+
+
+@dataclass
+class UsageUpdate:
+    """Context window and cost update notification.
+
+    Sent via session/update with sessionUpdate: "usage_update" to report
+    context window utilization and cumulative session cost.
+    """
+
+    # Context window (required)
+    used: int  # Tokens currently in context
+    size: int  # Total context window size in tokens
+
+    # Cost (optional)
+    cost: Cost | None = None
+
+    @property
+    def remaining(self) -> int:
+        """Compute remaining tokens in context window."""
+        return self.size - self.used
+
+    @property
+    def percentage(self) -> float:
+        """Compute percentage of context window used."""
+        if self.size <= 0:
+            return 0.0
+        return (self.used / self.size) * 100
 
 
 @dataclass
@@ -95,6 +139,7 @@ StreamEvent = (
     | ToolCallProgress
     | ToolCallComplete
     | TokenUsage
+    | UsageUpdate
     | PermissionRequest
     | PermissionTimeout
 )
