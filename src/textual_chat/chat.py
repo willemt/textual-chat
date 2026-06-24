@@ -980,6 +980,57 @@ class Chat(Widget):
         container.scroll_end(animate=False)
         return widget
 
+    async def _render_history_events(self, events: list[object]) -> None:
+        """Render replayed session history into the transcript.
+
+        Walks the events captured during session load and rebuilds the prior
+        conversation: user messages become user bubbles, assistant text/tool
+        calls are grouped into assistant messages. Each user message starts a
+        new turn (flushing the current assistant widget).
+        """
+        from .events import MessageChunk, ToolCallComplete, ToolCallStart, UserMessage
+
+        assistant_widget: MessageWidget | None = None
+        assistant_text = ""
+
+        def flush_assistant() -> None:
+            nonlocal assistant_widget, assistant_text
+            if assistant_widget is not None:
+                assistant_widget.mark_complete()
+                if assistant_text:
+                    self._message_history.append({"role": "assistant", "content": assistant_text})
+            assistant_widget = None
+            assistant_text = ""
+
+        def ensure_assistant() -> MessageWidget:
+            nonlocal assistant_widget
+            if assistant_widget is None:
+                assistant_widget = self._add_message("assistant", title=self._get_assistant_title())
+            return assistant_widget
+
+        for event in events:
+            if isinstance(event, UserMessage):
+                flush_assistant()
+                self._add_message("user", event.text)
+                self._message_history.append({"role": "user", "content": event.text})
+
+            elif isinstance(event, MessageChunk):
+                widget = ensure_assistant()
+                stream = await widget.ensure_stream()
+                await stream.write(event.text)  # type: ignore[attr-defined]
+                assistant_text += event.text
+
+            elif isinstance(event, ToolCallStart):
+                widget = ensure_assistant()
+                tu = ToolUse(event.name, event.arguments, self.cwd)
+                await widget.add_tooluse(tu, event.id)
+
+            elif isinstance(event, ToolCallComplete):
+                if assistant_widget is not None:
+                    assistant_widget.complete_tooluse(event.id)
+
+        flush_assistant()
+
     async def _resume_session(self) -> None:
         # Resume the previous session
         log.info("========== SESSION RESUME CLICKED ==========")
@@ -996,14 +1047,18 @@ class Chat(Widget):
                 self._conversation._session_id = session_id
                 log.warning(f"✅ Set conversation._session_id to: {session_id}")
 
-                # IMMEDIATELY trigger session loading by ensuring connection
-                log.warning("🔄 Triggering immediate session load...")
+                # Eagerly load the session and render its replayed history so the
+                # restored conversation is visible (not just loaded into the agent).
+                log.warning("🔄 Loading session history...")
                 try:
-                    if hasattr(self._conversation, "ensure_connected"):
+                    if hasattr(self._conversation, "load_history"):
+                        history = await self._conversation.load_history()
+                        await self._render_history_events(history)
+                    elif hasattr(self._conversation, "ensure_connected"):
                         await self._conversation.ensure_connected()
-                    log.warning("✅ Session load triggered successfully")
+                    log.warning("✅ Session history loaded successfully")
                 except Exception as e:
-                    log.warning(f"❌ Failed to trigger session load: {e}")
+                    log.warning(f"❌ Failed to load session history: {e}")
 
                 self._set_status("Resumed previous session")
             else:

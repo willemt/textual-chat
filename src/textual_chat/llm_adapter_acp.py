@@ -83,6 +83,7 @@ from .events import (
     ToolCallProgress,
     ToolCallStart,
     UsageUpdate,
+    UserMessage,
 )
 from .session_storage import get_session_storage
 
@@ -145,8 +146,22 @@ async def _handle_update(update: object, client: object, session_id: str) -> Non
 
 @_handle_update.register
 async def _handle_user_message(update: UserMessageChunk, client: object, session_id: str) -> None:
-    """Handle user message chunks (debugging only)."""
-    log.warning(f"⚠️  RECEIVED UserMessageChunk (should NOT queue this): {update.content}")
+    """Handle user message chunks.
+
+    During a live turn these are echoes of what the user just typed (already
+    shown locally), so they're dropped. While replaying a loaded session,
+    however, they're the only record of the human side of the transcript, so
+    surface them as UserMessage events.
+    """
+    handler = cast("ACPClientHandler", client)
+    if not handler.is_replaying(session_id):
+        log.debug(f"Dropping live UserMessageChunk: {update.content}")
+        return
+
+    content = update.content
+    if isinstance(content, TextContentBlock):
+        queue = handler.get_session_queue(session_id)
+        await queue.put(UserMessage(content.text))
 
 
 @_handle_update.register
@@ -490,6 +505,23 @@ class ACPClientHandler(Client):
         self._permission_responses: dict[str, asyncio.Future[RequestPermissionResponse]] = (
             {}
         )  # request_id -> future
+        self._replaying_sessions: set[str] = set()  # session_ids currently replaying history
+
+    def begin_replay(self, session_id: str) -> None:
+        """Mark a session as replaying prior history (during session/load).
+
+        While replaying, user message chunks are surfaced as events so the UI
+        can reconstruct the transcript; during normal turns they are dropped.
+        """
+        self._replaying_sessions.add(session_id)
+
+    def end_replay(self, session_id: str) -> None:
+        """Stop treating a session's updates as history replay."""
+        self._replaying_sessions.discard(session_id)
+
+    def is_replaying(self, session_id: str) -> bool:
+        """Whether the given session is currently replaying history."""
+        return session_id in self._replaying_sessions
 
     def register_session(self, session_id: str, cwd: str) -> None:
         """Register a session's working directory and create its event queue."""
@@ -1004,6 +1036,61 @@ class AsyncConversation:
             # Copy agent info from shared connection
             self.init_response = shared_conn.init_response
             self.agent_name = shared_conn.agent_name
+
+    async def load_history(self) -> list[StreamEvent]:
+        """Eagerly load an existing session and return its replayed history.
+
+        Performs ``session/load`` now (instead of lazily on the first prompt) and
+        captures the replay ``session/update``s the agent emits, returning them as
+        StreamEvents (UserMessage / MessageChunk / ToolCall*) so the UI can render
+        the prior transcript. Returns an empty list if there is no session to
+        resume, it was already loaded, or the agent doesn't support loading.
+        """
+        await self.ensure_connected()
+
+        if self._session_id is None or self._session_loaded or self._client is None:
+            return []
+        if self._conn is None:
+            return []
+
+        session_id = self._session_id
+        queue = self._client.get_session_queue(session_id)
+
+        # Discard anything queued before load so it can't be mistaken for history.
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._client.begin_replay(session_id)
+        try:
+            await self._conn.load_session(cwd=self._cwd, mcp_servers=[], session_id=session_id)
+            self._session_loaded = True
+            self._client.register_session(session_id, self._cwd)
+            log.warning(f"✅ Loaded session for history replay: {session_id}")
+        except Exception as e:
+            # Couldn't load - leave _session_loaded False so the normal
+            # fork/new fallback still runs on the first prompt.
+            log.warning(f"❌ session/load for history failed: {type(e).__name__}: {e}")
+            return []
+        finally:
+            self._client.end_replay(session_id)
+
+        # Replay updates are enqueued by the connection's read loop as the load
+        # request is serviced; yield once so any still-pending handlers run, then
+        # drain everything that accumulated.
+        await asyncio.sleep(0)
+        history: list[StreamEvent] = []
+        while not queue.empty():
+            try:
+                event = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if event is not None:
+                history.append(event)
+        log.warning(f"📜 Replayed {len(history)} history events for {session_id}")
+        return history
 
     def clear(self) -> None:
         """Clear conversation - creates new session on next prompt."""

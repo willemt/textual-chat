@@ -21,6 +21,18 @@ class MessageChunk:
 
 
 @dataclass
+class UserMessage:
+    """A user message, replayed from session history on resume.
+
+    Only emitted while loading/replaying a prior ACP session so the UI can
+    reconstruct the human side of the transcript. Live turns never emit this
+    (the user's message is already shown locally when they send it).
+    """
+
+    text: str
+
+
+@dataclass
 class ThoughtChunk:
     """A chunk of thinking/reasoning text (extended thinking)."""
 
@@ -133,6 +145,7 @@ class PermissionTimeout:
 # Union type for all possible events
 StreamEvent = (
     MessageChunk
+    | UserMessage
     | ThoughtChunk
     | PlanChunk
     | ToolCallStart
