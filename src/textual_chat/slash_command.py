@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -48,19 +49,19 @@ class SlashCommandManager:
         """Get a slash command by name."""
         return self._commands.get(name.lower())
 
-    def all(self, include_hidden: bool = False) -> list[SlashCommand]:
+    def all(self, include_hidden: bool = False) -> builtins.list[SlashCommand]:
         """Get all registered commands, optionally including hidden ones."""
         commands = [c for c in self._commands.values()]
         if not include_hidden:
             commands = [cmd for cmd in commands if not cmd.hidden]
         return sorted(commands, key=lambda c: c.name)
 
-    def filter(self, predicate: Callable[[SlashCommand], bool]) -> list[SlashCommand]:
+    def filter(self, predicate: Callable[[SlashCommand], bool]) -> builtins.list[SlashCommand]:
         """Filter commands by a predicate function."""
         return [cmd for cmd in self._commands.values() if predicate(cmd)]
 
     # Alias for backwards compatibility
-    def list(self, include_hidden: bool = False) -> list[SlashCommand]:
+    def list(self, include_hidden: bool = False) -> builtins.list[SlashCommand]:
         """Alias for all()."""
         return self.all(include_hidden=include_hidden)
 
@@ -101,7 +102,7 @@ class SlashCommandManager:
         name: str | None = None
 
         def decorator(fn: CommandHandler) -> CommandHandler:
-            cmd_name = name if name else fn.__name__
+            cmd_name = name if name else getattr(fn, "__name__", "unknown")
             cmd_description = description if description else (fn.__doc__ or "").strip()
             self.add(
                 SlashCommand(
@@ -114,7 +115,7 @@ class SlashCommandManager:
             return fn
 
         # Called as @slash_command (no parens) - func is the decorated function
-        if callable(name_or_func):
+        if callable(name_or_func) and not isinstance(name_or_func, str):
             return decorator(name_or_func)
 
         # Called as @slash_command("name") or @slash_command(name="name")

@@ -1,7 +1,5 @@
 """Tests for initial_messages feature."""
 
-import pytest
-
 from textual_chat import Chat
 
 

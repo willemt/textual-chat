@@ -58,12 +58,19 @@ def _extract_cache_details(usage: object) -> CacheDetails:
     if hasattr(usage, "prompt_tokens_details"):
         ptd = usage.prompt_tokens_details
         if ptd and hasattr(ptd, "cached_tokens"):
-            details["cached_tokens"] = ptd.cached_tokens or 0
+            cached = getattr(ptd, "cached_tokens", 0)
+            details["cached_tokens"] = int(cached) if isinstance(cached, (int, float, str)) else 0
     # Anthropic format
     if hasattr(usage, "cache_read_input_tokens"):
-        details["cache_read_input_tokens"] = usage.cache_read_input_tokens or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0)
+        details["cache_read_input_tokens"] = (
+            int(cache_read) if isinstance(cache_read, (int, float, str)) else 0
+        )
     if hasattr(usage, "cache_creation_input_tokens"):
-        details["cache_creation_input_tokens"] = usage.cache_creation_input_tokens or 0
+        cache_creation = getattr(usage, "cache_creation_input_tokens", 0)
+        details["cache_creation_input_tokens"] = (
+            int(cache_creation) if isinstance(cache_creation, (int, float, str)) else 0
+        )
     return details
 
 
@@ -137,8 +144,8 @@ def _func_to_tool_schema(func: Callable) -> dict[str, JSON]:
         hints = getattr(func, "__annotations__", {})
     sig = inspect.signature(func)
 
-    properties = {}
-    required = []
+    properties: dict[str, JSON] = {}
+    required: list[JSON] = []
 
     for name, param in sig.parameters.items():
         if name in ("self", "cls"):
@@ -147,15 +154,16 @@ def _func_to_tool_schema(func: Callable) -> dict[str, JSON]:
         if param.default is inspect.Parameter.empty:
             required.append(name)
 
+    func_name = getattr(func, "__name__", "unknown")
     return {
         "type": "function",
         "function": {
-            "name": func.__name__,
-            "description": (func.__doc__ or "").strip() or f"Call {func.__name__}",
+            "name": func_name,
+            "description": (func.__doc__ or "").strip() or f"Call {func_name}",
             "parameters": {
                 "type": "object",
-                "properties": properties,  # type: ignore[dict-item]
-                "required": required,  # type: ignore[dict-item]
+                "properties": properties,
+                "required": required,
             },
         },
     }
@@ -316,7 +324,7 @@ class AsyncChainResponse:
         for func in self._tools:
             schema = _func_to_tool_schema(func)
             self._tool_schemas.append(schema)
-            self._tool_lookup[func.__name__] = func
+            self._tool_lookup[getattr(func, "__name__", "unknown")] = func
 
         # Response tracking
         self._responses: list[AsyncResponse] = []

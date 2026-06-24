@@ -516,11 +516,13 @@ class Chat(Widget):
                         and isinstance(item[0], DataTable)
                     ):
                         # It's a (DataTable, name) tuple
-                        self._register_datatable(item[0], item[1])
+                        table_name = item[1]
+                        self._register_datatable(item[0], str(table_name) if table_name else None)
                     else:
                         # Assume it's an MCP server config (dict)
                         if isinstance(item, dict):
-                            self._mcp_servers.append(item)
+                            # Cast to the expected type for MCP server config
+                            self._mcp_servers.append({str(k): str(v) for k, v in item.items()})
 
     def _get_assistant_title(self) -> str | None:
         """Get the effective assistant title for display.
@@ -538,10 +540,13 @@ class Chat(Widget):
 
     def _register_tool(self, func: Callable, name: str | None = None) -> None:
         """Register a tool function internally."""
-        tool_name = name or func.__name__
+        tool_name = name or str(getattr(func, "__name__", "unknown"))
         # Wrap with custom name if provided
-        if name and func.__name__ != name:
-            func.__name__ = name
+        if name and getattr(func, "__name__", None) != name:
+            try:
+                func.__name__ = name
+            except AttributeError:
+                pass  # Some callables don't allow __name__ assignment
         self._tools[tool_name] = func
 
     def _register_datatable(self, table: DataTable, name: str | None = None) -> None:
@@ -1786,7 +1791,8 @@ Please address this new message. If it's related to the previous task, you may c
             and self._conversation
             and hasattr(self._conversation, "_session_id")
         ):
-            if session_id := self._conversation._session_id:
+            session_id = getattr(self._conversation, "_session_id", None)
+            if session_id and isinstance(session_id, str):
                 self._session_storage.save_session(
                     self._model.model_id, session_id, self._message_history
                 )

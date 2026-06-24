@@ -119,7 +119,7 @@ class SlashCommandAutocomplete(Widget):
             return
 
         if isinstance(event, events.Key) and option_list.option_count:
-            displayed = self.styles.display != "none"
+            displayed = self.display
             highlighted = option_list.highlighted or 0
 
             if event.key == "down":
@@ -243,13 +243,13 @@ class SlashCommandAutocomplete(Widget):
 
     def _complete(self, option_index: int) -> None:
         """Complete the command at the given option index."""
-        if self.styles.display == "none" or self.option_list.option_count == 0:
+        if not self.display or self.option_list.option_count == 0:
             return
 
         option = self.option_list.get_option_at_index(option_index)
         # Extract command name from the option (format is "/name - description")
         if hasattr(option.prompt, "plain"):
-            command_text = option.prompt.plain
+            command_text = str(option.prompt.plain)
         else:
             command_text = str(option.prompt)
         command_name = command_text.split(" - ")[0]  # Gets "/name"
@@ -289,11 +289,11 @@ class SlashCommandAutocomplete(Widget):
 
     def action_hide(self) -> None:
         """Hide the dropdown."""
-        self.styles.display = "none"
+        self.display = False
 
     def action_show(self) -> None:
         """Show the dropdown."""
-        self.styles.display = "block"
+        self.display = True
 
     @on(OptionList.OptionSelected)
     def _on_option_selected(self, event: OptionList.OptionSelected) -> None:
